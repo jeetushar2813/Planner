@@ -4,6 +4,8 @@ import { h, clear, todayISO, addDays, daysBetween, fmtDate, debounce } from '../
 import { OPEN_CATEGORIES, PRIORITIES, PRIORITY_LABEL, PRIORITY_RANK } from '../core/model.js';
 import * as perm from '../core/perm.js';
 import { stepsForUser } from '../core/steps.js';
+import { tagCounts } from '../core/tags.js';
+import { openBlockers } from '../core/deps.js';
 import {
   state, bus, myTeams, teamById, statusById, userName, projectName, activeStatuses,
   watchMyTasks, loadOpenTasks, loadFinished, loadRefData
@@ -43,6 +45,13 @@ const stepsChip = (t, user) => {
   return n ? h('span', { class: 'chip chip-step steps-for-me', title: 'Steps in this task are waiting for you or your team' }, `${n} step${n === 1 ? '' : 's'} for you`) : null;
 };
 
+// "#admissions #event": up to three tags; "Waiting": something this task waits for is not finished.
+const tagChips = (t) => (t.tags || []).slice(0, 3).map((x) => h('span', { class: 'chip chip-tag small-chip' }, '#' + x));
+const waitingChip = (t) => {
+  const { open } = openBlockers(t, (id) => state.tasks.get(id));
+  return open.length ? h('span', { class: 'chip chip-waiting', title: `Waiting for: ${open.map((b) => b.title).join(', ')}` }, `Waiting for ${open.length}`) : null;
+};
+
 const checklistProgress = (t) => {
   const items = t.checklist || [];
   return items.length ? `${items.filter((i) => i.done).length}/${items.length}` : '';
@@ -57,8 +66,8 @@ const SORTS = {
 
 // Filter choices are remembered while you move between screens.
 const freshMemory = () => ({
-  my: { search: '', status: '', priority: '', project: '', sort: 'due', view: 'list', finished: false },
-  team: { search: '', status: '', priority: '', project: '', owner: '', sort: 'due', view: 'list', finished: false, teamId: null, stepsForMe: false }
+  my: { search: '', status: '', priority: '', project: '', tag: '', sort: 'due', view: 'list', finished: false },
+  team: { search: '', status: '', priority: '', project: '', tag: '', owner: '', sort: 'due', view: 'list', finished: false, teamId: null, stepsForMe: false }
 });
 let memory = freshMemory();
 let memoryUser = null;
@@ -98,6 +107,7 @@ function renderBrowser(container, mode) {
   const prioritySelect = select([{ value: '', label: 'Any priority' }, ...PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] }))], f.priority,
     { 'aria-label': 'Filter by priority', onchange: () => { f.priority = prioritySelect.value; paint(); } });
   const projectSelect = h('select', { 'aria-label': 'Filter by project', onchange: () => { f.project = projectSelect.value; paint(); } });
+  const tagSelect = h('select', { 'aria-label': 'Filter by tag', onchange: () => { f.tag = tagSelect.value; paint(); } });
   const ownerSelect = isTeam ? h('select', { 'aria-label': 'Filter by owner', onchange: () => { f.owner = ownerSelect.value; paint(); } }) : null;
   const sortSelect = select(Object.entries(SORTS).map(([value, s]) => ({ value, label: 'Sort: ' + s.label })), f.sort,
     { 'aria-label': 'Sort', onchange: () => { f.sort = sortSelect.value; paint(); } });
@@ -122,7 +132,7 @@ function renderBrowser(container, mode) {
   }) }, '+ New task');
 
   const toolbar = h('div', { class: 'toolbar' },
-    isTeam ? teamSelect : null, search, statusSelect, prioritySelect, projectSelect, ownerSelect, sortSelect);
+    isTeam ? teamSelect : null, search, statusSelect, prioritySelect, projectSelect, tagSelect, ownerSelect, sortSelect);
   const toolbar2 = h('div', { class: 'toolbar toolbar-2' },
     viewToggle,
     h('label', { class: 'check' }, finishedBox, ' Show finished (last 30 days)'),
@@ -152,6 +162,13 @@ function renderBrowser(container, mode) {
       h('option', { value: '' }, 'Any project'),
       ...projects.map((p) => h('option', { value: p.id, selected: p.id === f.project }, p.name)));
     projectSelect.value = f.project;
+    const tags = tagCounts([...state.tasks.values()].filter((t) => !t.archived && (isTeam ? (f.teamId ? t.teamId === f.teamId : perm.canViewTask(user, t)) : t.ownerId === user.id)));
+    if (f.tag && !tags.some(([t]) => t === f.tag)) f.tag = '';
+    clear(tagSelect).append(
+      h('option', { value: '' }, 'Any tag'),
+      ...tags.map(([t, n]) => h('option', { value: t, selected: t === f.tag }, `#${t} (${n})`)));
+    tagSelect.value = f.tag;
+    tagSelect.hidden = !tags.length;
     if (ownerSelect) {
       const people = state.ref.users.filter((u) => u.active !== false
         && (f.teamId ? (u.teamIds || []).includes(f.teamId) : true));
@@ -225,7 +242,8 @@ function renderBrowser(container, mode) {
       if (f.status && t.status !== f.status) return false;
       if (f.priority && t.priority !== f.priority) return false;
       if (f.project && t.projectId !== f.project) return false;
-      if (q && !(`${t.title} ${t.description || ''} ${userName(t.ownerId)} ${projectName(t.projectId)}`.toLowerCase().includes(q))) return false;
+      if (f.tag && !(t.tags || []).includes(f.tag)) return false;
+      if (q && !(`${t.title} ${t.description || ''} ${userName(t.ownerId)} ${projectName(t.projectId)} ${(t.tags || []).join(' ')}`.toLowerCase().includes(q))) return false;
       return true;
     }).sort(SORTS[f.sort].fn);
   }
@@ -244,7 +262,7 @@ function renderBrowser(container, mode) {
     const overdue = list.filter((t) => dueState(t).kind === 'overdue').length;
     summary.textContent = `${list.length} task${list.length === 1 ? '' : 's'}${overdue ? ` · ${overdue} overdue` : ''}`;
     if (!list.length) {
-      const filtered = f.search || f.status || f.priority || f.project || f.owner;
+      const filtered = f.search || f.status || f.priority || f.project || f.owner || f.tag;
       content.append(emptyState(filtered ? 'No tasks match these filters' : (isTeam ? 'No open tasks for this team' : 'Nothing assigned to you'),
         filtered ? 'Clear a filter to see more.' : 'Use "New task" to add one.'));
       return;
@@ -279,7 +297,7 @@ function renderBrowser(container, mode) {
         tabindex: 0, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target.tagName === 'TR') open(); }
       },
         h('td', { class: 'cell-title' },
-          h('div', { class: 'title' }, t.title, stepsChip(t, user)),
+          h('div', { class: 'title' }, t.title, stepsChip(t, user), waitingChip(t), tagChips(t)),
           h('div', { class: 'sub muted' },
             [projectName(t.projectId), checklistProgress(t) && `☑ ${checklistProgress(t)}`, t.statusNote && `“${t.statusNote}”`]
               .filter(Boolean).join(' · '))),
@@ -333,7 +351,7 @@ function renderBrowser(container, mode) {
       onclick: () => openTaskPanel({ task: t, onSaved: () => paint() }),
       onkeydown: (e) => { if (e.key === 'Enter') openTaskPanel({ task: t, onSaved: () => paint() }); }
     },
-      h('div', { class: 'card-title' }, t.title, stepsChip(t, user)),
+      h('div', { class: 'card-title' }, t.title, stepsChip(t, user), waitingChip(t), tagChips(t)),
       h('div', { class: 'card-meta' }, priorityChip(t.priority), dueLabel(t)),
       h('div', { class: 'card-foot' },
         avatar(userName(t.ownerId), 22), h('span', { class: 'muted' }, userName(t.ownerId).split(' ')[0]),

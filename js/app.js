@@ -6,8 +6,12 @@ import { roleLabel } from './core/model.js';
 import { appSettings } from './config.js';
 import * as perm from './core/perm.js';
 import {
-  state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError, hrQueue, refreshHrQueue
+  state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError, hrQueue, refreshHrQueue,
+  watchMyTasks, runRecurring
 } from './core/store.js';
+import { computeAlerts, getSeen, markSeen } from './core/alerts.js';
+import { fmtDate } from './core/util.js';
+import { renderTemplates } from './ui/templates.js';
 import { loadBackend } from './backend/index.js';
 import { renderLogin } from './ui/login.js';
 import { renderHome } from './ui/home.js';
@@ -25,6 +29,7 @@ import { renderHr } from './ui/hr.js';
 import { renderTeams } from './ui/teams.js';
 import { renderStatuses } from './ui/statuses.js';
 import { avatar, toast, errorMessage, spinner } from './ui/components.js';
+import { userName } from './core/store.js';
 import { openTaskPanel } from './ui/taskform.js';
 
 applyTheme(savedTheme(), { remember: false });   // the colour theme chosen on this device
@@ -35,6 +40,7 @@ const ROUTES = [
   { path: 'home', label: 'Home', icon: '⌂', allow: () => true, render: renderHome },
   { path: 'my', label: 'My tasks', icon: '☑', allow: () => true, render: renderMyTasks },
   { path: 'team', label: 'Team tasks', icon: '▦', allow: () => true, render: renderTeamTasks },
+  { path: 'templates', label: 'Templates', icon: '⟳', allow: perm.isLeaderUp, render: renderTemplates },
   { path: 'calendar', label: 'Calendar', icon: '▤', allow: () => true, render: renderCalendar },
   { path: 'leave', label: 'Leave', icon: '☂', allow: () => true, render: renderLeave },
   { path: 'hr', label: 'HR leave', icon: '✚', allow: perm.canSeeHr, render: renderHr },
@@ -75,6 +81,7 @@ async function boot() {
 async function handleAuth(authUser) {
   if (!authUser) {
     stopScreen();
+    if (stopAlerts) stopAlerts();
     state.user = null;
     showLogin(pendingMessage);
     pendingMessage = '';
@@ -108,6 +115,56 @@ function showLogin(message = '') {
 
 let shellRefListener = null;
 let hrBadgeListener = null;
+let stopAlerts = null;      // stops the live listener behind the alerts bell
+
+// The alerts bell: tasks given to you, overdue, due soon. Worked out from your own open tasks,
+// which are kept up to date live, so it costs no extra reads.
+function buildBell() {
+  const user = state.user;
+  const count = h('span', { class: 'bell-count', hidden: true });
+  const btn = h('button', { type: 'button', class: 'btn btn-ghost bell', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: 'New tasks, overdue and due soon' }, 'Alerts', count);
+  let pop = null;
+  let alerts = computeAlerts([], user, { seenAt: getSeen(user.id) });
+  const refresh = () => {
+    alerts = computeAlerts(state.tasks.values(), user, { seenAt: getSeen(user.id) });
+    count.textContent = alerts.count;
+    count.hidden = !alerts.count;
+    if (pop) drawPop();
+  };
+  const close = () => { if (pop) { pop.remove(); pop = null; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', onKey); } };
+  const outside = (e) => { if (pop && !pop.contains(e.target) && !btn.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const item = (t, sub) => h('button', { type: 'button', class: 'alert-item', onclick: () => { close(); openTaskPanel({ task: t, onSaved: () => route() }); } },
+    h('strong', null, t.title), h('span', { class: 'sub' }, sub));
+  function drawPop() {
+    clear(pop);
+    const a = alerts;
+    if (!a.count) pop.append(h('p', { class: 'muted' }, 'Nothing needs your attention right now.'));
+    if (a.assigned.length) pop.append(h('h3', null, 'New for you'), ...a.assigned.map((t) => item(t, `From ${userName(t.assignedBy || t.createdBy)}${t.dueDate ? `, due ${fmtDate(t.dueDate)}` : ''}`)));
+    if (a.overdue.length) pop.append(h('h3', null, 'Overdue'), ...a.overdue.map((t) => item(t, `Was due ${fmtDate(t.dueDate)}`)));
+    if (a.dueSoon.length) pop.append(h('h3', null, 'Due soon'), ...a.dueSoon.map((t) => item(t, `Due ${fmtDate(t.dueDate)}`)));
+    pop.append(h('div', { class: 'alert-foot' },
+      h('a', { href: '#/my', onclick: close }, 'Open My tasks'),
+      a.assigned.length ? h('button', { type: 'button', class: 'link-btn', onclick: () => { markSeen(user.id); refresh(); } }, 'Mark new as seen') : null));
+  }
+  btn.addEventListener('click', () => {
+    if (pop) { close(); return; }
+    pop = h('div', { class: 'alert-pop', role: 'dialog', 'aria-label': 'Alerts' });
+    document.body.append(pop);
+    btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('mousedown', outside, true);
+    document.addEventListener('keydown', onKey);
+    drawPop();
+  });
+  const onTasks = () => refresh();
+  bus.addEventListener('tasks', onTasks);
+  let unwatch = null;
+  try { unwatch = watchMyTasks(refresh, () => {}); } catch { /* alerts just stay empty */ }
+  if (stopAlerts) stopAlerts();
+  stopAlerts = () => { bus.removeEventListener('tasks', onTasks); if (unwatch) unwatch(); close(); stopAlerts = null; };
+  refresh();
+  return btn;
+}
 function showShell() {
   const user = state.user;
   navLinks = [];
@@ -177,6 +234,7 @@ function showShell() {
     h('div', { class: 'brand brand-top' }, h('span', { class: 'brand-mark' }, '✓'), appSettings.appName),
     h('div', { class: 'spacer' }),
     isDemo() ? h('span', { class: 'demo-pill', title: 'Sample data kept only in this browser' }, 'Demo mode') : null,
+    buildBell(),
     demoSwitch);
 
   clear(root).append(h('div', { class: 'shell' }, sidebar,
@@ -185,6 +243,10 @@ function showShell() {
 
   if (!location.hash || location.hash === '#') location.hash = '#/home';
   route();
+  // Recurring tasks that are due are made now (Team Leader, Manager, Director).
+  if (perm.isLeaderUp(user)) {
+    runRecurring().then((n) => { if (n) toast(`${n} recurring task${n === 1 ? '' : 's'} made.`, 'success'); }).catch(() => {});
+  }
 }
 
 async function switchDemoUser(email) {

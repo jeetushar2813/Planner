@@ -981,3 +981,128 @@ describe('checklist steps given to people', () => {
     await assertFails(createTask('memA1', 'memCopy', { ownerId: 'memA2' }));
   });
 });
+
+// ---------------------------------------------------------------- task extras and templates
+
+describe('tags, waiting-for, and who gave the task', () => {
+  test('a leader can create a task with tags, blockers and an assignment stamp', async () => {
+    await assertSucceeds(createTask('ldrA', id('t'), { tags: ['admissions', 'event'], blockedBy: ['tA1'], assignedBy: 'ldrA', assignedAt: serverTimestamp() }));
+  });
+  test('more than 8 tags or 5 blockers is refused', async () => {
+    await assertFails(createTask('ldrA', id('t'), { tags: Array.from({ length: 9 }, (_, i) => 't' + i) }));
+    await assertFails(createTask('ldrA', id('t'), { blockedBy: ['a', 'b', 'c', 'd', 'e', 'f'] }));
+  });
+  test('tags must be a list and assignedBy a string', async () => {
+    await assertFails(createTask('ldrA', id('t'), { tags: 'admissions' }));
+    await assertFails(createTask('ldrA', id('t'), { assignedBy: 5 }));
+    await assertFails(createTask('ldrA', id('t'), { assignedAt: 'yesterday' }));
+  });
+  test('a leader can edit tags and blockers on a task of their team', async () => {
+    await assertSucceeds(updateTask('ldrA', 'tA1', { tags: ['qc'], blockedBy: ['tA2'] }));
+  });
+  test('a member cannot change tags or blockers, even on their own task', async () => {
+    await assertFails(updateTask('memA1', 'tA1', { tags: ['sneaky'] }));
+    await assertFails(updateTask('memA1', 'tA1', { blockedBy: ['tA2'] }));
+  });
+  test('a member still moves their own task along', async () => {
+    await assertSucceeds(updateTask('memA1', 'tA1', { status: 'inprogress', statusCategory: 'active' }));
+  });
+  test('reassigning stamps the new owner; a member cannot reassign', async () => {
+    await assertSucceeds(updateTask('ldrA', 'tA1', { ownerId: 'memA2', assignedBy: 'ldrA', assignedAt: serverTimestamp() }));
+    await assertFails(updateTask('memA1', 'tA1', { ownerId: 'memA2', assignedBy: 'memA1', assignedAt: serverTimestamp() }));
+  });
+});
+
+describe('task templates', () => {
+  const tpl = (over = {}) => ({
+    name: 'Monthly report', teamId: 'teamA', title: 'Report for {month}', description: '', priority: 'medium',
+    ownerIds: ['memA1'], repeat: 'monthly', nextDate: '2026-12-01', active: true, dueInDays: 5, tags: ['report'],
+    checklist: [{ id: 's1', text: 'Collect' }], createdBy: 'ldrA', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over
+  });
+  const makeTpl = (uid, tid, over = {}) => logged(uid, { path: `taskTemplates/${tid}`, kind: 'create', type: 'template', entityId: tid, teamId: over.teamId || 'teamA', data: tpl({ createdBy: uid, ...over }) });
+  const seedTpl = (tid = 'tpl1', over = {}) => env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'taskTemplates', tid), { ...tpl(over), createdAt: new Date(), updatedAt: new Date(), lastLogId: 'seedlog' }));
+  const editTpl = (uid, tid, patch, teamId = 'teamA') => logged(uid, { path: `taskTemplates/${tid}`, kind: 'update', type: 'template', entityId: tid, teamId, data: { updatedAt: serverTimestamp(), ...patch } });
+
+  test('Team Leader, Manager, Director and Superuser can create one for their team', async () => {
+    await assertSucceeds(makeTpl('ldrA', id('tpl')));
+    await assertSucceeds(makeTpl('mgrA', id('tpl')));
+    await assertSucceeds(makeTpl('dir', id('tpl')));
+    await assertSucceeds(makeTpl('su', id('tpl')));
+  });
+  test('Assistant Team Leader, members and other teams\' leaders cannot', async () => {
+    await assertFails(makeTpl('asstA', id('tpl')));
+    await assertFails(makeTpl('memA1', id('tpl')));
+    await assertFails(makeTpl('ldrB', id('tpl')));
+    await assertFails(makeTpl('notSu', id('tpl'), { teamId: 'teamB' }));
+  });
+  test('a template needs its log entry', async () => {
+    const db = as('ldrA');
+    await assertFails(setDoc(doc(db, 'taskTemplates', id('tpl')), { ...tpl(), lastLogId: 'nothing' }));
+  });
+  test('bad shapes are refused', async () => {
+    await assertFails(makeTpl('ldrA', id('tpl'), { repeat: 'daily' }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { ownerIds: [] }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { ownerIds: ['a', 'b', 'c', 'd', 'e', 'f'] }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { dueInDays: 400 }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { priority: 'whenever' }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { name: '' }));
+    await assertFails(makeTpl('ldrA', id('tpl'), { createdBy: 'memA1' }));
+  });
+  test('read: the team\'s leaders and assistants and the Director, not members or other teams', async () => {
+    await seedTpl();
+    await assertSucceeds(getDoc(doc(as('ldrA'), 'taskTemplates', 'tpl1')));
+    await assertSucceeds(getDoc(doc(as('asstA'), 'taskTemplates', 'tpl1')));
+    await assertSucceeds(getDoc(doc(as('dir'), 'taskTemplates', 'tpl1')));
+    await assertFails(getDoc(doc(as('memA1'), 'taskTemplates', 'tpl1')));
+    await assertFails(getDoc(doc(as('ldrB'), 'taskTemplates', 'tpl1')));
+  });
+  test('the exact queries the app runs', async () => {
+    await seedTpl();
+    await assertSucceeds(getDocs(query(collection(as('ldrA'), 'taskTemplates'), where('teamId', '==', 'teamA'))));
+    await assertSucceeds(getDocs(collection(as('dir'), 'taskTemplates')));
+    await assertFails(getDocs(collection(as('ldrA'), 'taskTemplates')));
+  });
+  test('edit and move the next date on (what the generator writes)', async () => {
+    await seedTpl();
+    await assertSucceeds(editTpl('ldrA', 'tpl1', { nextDate: '2027-01-01', lastRunDate: '2026-12-01' }));
+    await assertSucceeds(editTpl('ldrA', 'tpl1', { active: false }));
+    await assertFails(editTpl('asstA', 'tpl1', { active: false }));
+    await assertFails(editTpl('ldrB', 'tpl1', { active: false }));
+  });
+  test('a template cannot be moved to a team the editor does not manage, or deleted', async () => {
+    await seedTpl();
+    await assertFails(editTpl('ldrA', 'tpl1', { teamId: 'teamB' }));
+    await assertFails(deleteDoc(doc(as('dir'), 'taskTemplates', 'tpl1')));
+  });
+  test('the generator batch: tasks with fixed ids + template update + logs, in one write', async () => {
+    await seedTpl('tplGen', { ownerIds: ['memA1', 'memA2'], nextDate: '2026-11-01' });
+    const db = as('ldrA');
+    const batch = writeBatch(db);
+    const logs = [];
+    for (const owner of ['memA1', 'memA2']) {
+      const tid = `rec-tplGen-2026-11-01-${owner}`;
+      const lid = id('log');
+      batch.set(doc(db, 'tasks', tid), taskDoc({ ownerId: owner, createdBy: 'ldrA', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), lastLogId: lid, recurringId: 'tplGen', assignedBy: 'ldrA', assignedAt: serverTimestamp(), tags: ['report'] }));
+      batch.set(doc(db, 'activityLog', lid), logBody('ldrA', 'leader', 'task', tid, 'teamA'));
+      logs.push(lid);
+    }
+    const tl = id('log');
+    batch.update(doc(db, 'taskTemplates', 'tplGen'), { nextDate: '2026-12-01', lastRunDate: '2026-11-01', updatedAt: serverTimestamp(), lastLogId: tl });
+    batch.set(doc(db, 'activityLog', tl), logBody('ldrA', 'leader', 'template', 'tplGen', 'teamA'));
+    await assertSucceeds(batch.commit());
+  });
+  test('a second attempt to make the same occurrence is refused (the task already exists)', async () => {
+    await seedTpl('tplGen2', { ownerIds: ['memA1'], nextDate: '2026-11-01' });
+    const make = async () => {
+      const db = as('ldrA');
+      const batch = writeBatch(db);
+      const tid = 'rec-tplGen2-2026-11-01-memA1';
+      const lid = id('log');
+      batch.set(doc(db, 'tasks', tid), taskDoc({ ownerId: 'memA1', createdBy: 'ldrA', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), lastLogId: lid }));
+      batch.set(doc(db, 'activityLog', lid), logBody('ldrA', 'leader', 'task', tid, 'teamA'));
+      return batch.commit();
+    };
+    await assertSucceeds(make());
+    await assertFails(make());
+  });
+});

@@ -14,6 +14,8 @@ Start with **SETUP.md**.
 
 - Five roles: Director, Manager, Team Leader, Assistant Team Leader, Team Member, each with a login.
 - Superuser: a switch on a person's account that gives every Director power while their role stays (for example Team Leader). Only a Director or Superuser can switch it on.
+- Task extras: tags, "waiting for" other tasks, Duplicate, add several tasks at once, required fields (a due date by default), and a warning when the owner is on leave or the due date is a weekend or holiday.
+- Templates and recurring tasks (weekly, monthly...), made when a Team Leader, Manager or Director opens the app. An Alerts button shows tasks given to you, overdue and due soon.
 - HR: a switch on a person's account (set by a Director or Superuser). HR sets the yearly leave entitlements (annual, medical, hospitalization, compassionate, marriage) for everyone, with per-person exceptions, sees every approved leave and a balance table, and acknowledges approved leave. Leave is approved by the Team Leader then the Director; HR's acknowledgement never blocks it.
 - A task can be given to several people at once (one task each), and each checklist step can be given to one person or to the whole team.
 - Tasks with owner, team, project, priority, start and due dates, checklist, comments and a status note.

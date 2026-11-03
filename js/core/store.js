@@ -18,6 +18,10 @@ import * as perm from './perm.js';
 import { deriveStepFields, cleanSteps, dropOutsiders } from './steps.js';
 import { groupLeaves, buildPolicy } from './entitlement.js';
 import { applyTheme, isTheme } from './theme.js';
+import { cleanTags } from './tags.js';
+import { MAX_BLOCKERS } from './deps.js';
+import { missingForNew } from './taskrules.js';
+import { dueOccurrence, occurrenceTaskId, dueDateFor, MAX_TEMPLATE_OWNERS, REPEATS } from './recurrence.js';
 
 let backend = null;
 
@@ -76,6 +80,8 @@ export function resolveForLog(field, value) {
     case 'priority': return PRIORITY_LABEL[value] || value;
     case 'role': return ROLE_LABEL[value] || value;
     case 'teamIds': return (value || []).map(teamName).join(', ');
+    case 'ownerIds': return (value || []).map(userName).join(', ');
+    case 'blockedBy': return (value || []).map((id) => state.tasks.get(id)?.title || 'another task').join(', ');
     default: return value;
   }
 }
@@ -272,7 +278,7 @@ export async function changeMyPassword(current, next, confirm) {
 
 const TRACKED_TASK_FIELDS = [
   'title', 'description', 'teamId', 'projectId', 'ownerId', 'status', 'statusNote',
-  'priority', 'startDate', 'dueDate', 'estimateHours', 'checklist', 'archived'
+  'priority', 'startDate', 'dueDate', 'estimateHours', 'checklist', 'tags', 'blockedBy', 'archived'
 ];
 
 const openQuery = [['archived', '==', false], ['statusCategory', 'in', OPEN_CATEGORIES]];
@@ -353,6 +359,7 @@ export function validateTaskDraft(d) {
   if (!d.teamId) return 'Please choose a team.';
   if (!d.ownerId) return 'Please choose who this task is for.';
   if (d.startDate && d.dueDate && d.dueDate < d.startDate) return 'The due date is before the start date.';
+  if ((d.blockedBy || []).length > MAX_BLOCKERS) return `A task can wait for at most ${MAX_BLOCKERS} other tasks.`;
   if (d.estimateHours !== '' && d.estimateHours !== null && d.estimateHours !== undefined) {
     const n = Number(d.estimateHours);
     if (isNaN(n) || n < 0) return 'The estimate must be a number of hours (0 or more).';
@@ -380,23 +387,28 @@ const teamIdsOf = (id) => userById(id)?.teamIds || [];
 export const CREATE_CHUNK = 5;
 export const MAX_ASSIGNEES = 30;
 
-function buildTask(draft, ownerId, status) {
+// `extra` is for tasks made from a template: a fixed id, and the template they came from.
+function buildTask(draft, ownerId, status, extra = {}) {
   const teamId = teamForOwner(draft, ownerId);
   const { steps, dropped } = dropOutsiders(cleanSteps(draft.checklist), teamId, teamIdsOf);
-  const id = backend.newId('tasks');
+  const id = extra.id || backend.newId('tasks');
   const stamp = backend.ts();
+  const title = (extra.title || draft.title).trim();
+  const tags = cleanTags(draft.tags);
+  const blockedBy = [...new Set(draft.blockedBy || [])].slice(0, MAX_BLOCKERS);
   const log = makeLog({
     action: 'task.create', entityType: 'task', entityId: id,
-    entityTitle: draft.title.trim(), teamId,
+    entityTitle: title, teamId,
     changes: [
       { field: 'ownerId', from: '', to: userName(ownerId) },
       { field: 'status', from: '', to: status.name },
       ...(draft.dueDate ? [{ field: 'dueDate', from: '', to: draft.dueDate }] : []),
-      { field: 'priority', from: '', to: PRIORITY_LABEL[draft.priority || 'medium'] }
+      { field: 'priority', from: '', to: PRIORITY_LABEL[draft.priority || 'medium'] },
+      ...(extra.recurringName ? [{ field: 'recurring', from: '', to: extra.recurringName }] : [])
     ]
   });
   const task = {
-    title: draft.title.trim(), description: draft.description || '',
+    title, description: draft.description || '',
     teamId, projectId: cleanText(draft.projectId), ownerId,
     createdBy: state.user.id,
     status: status.id, statusCategory: status.category, statusNote: null,
@@ -405,6 +417,11 @@ function buildTask(draft, ownerId, status) {
     estimateHours: cleanNum(draft.estimateHours),
     checklist: steps, ...deriveStepFields(steps), archived: false,
     completedAt: null, completedDate: null, submits: 0, reworks: 0,
+    // who gave this task to its owner, and when: the owner's "new for you" alert reads these
+    assignedBy: state.user.id, assignedAt: stamp,
+    ...(tags.length ? { tags } : {}),
+    ...(blockedBy.length ? { blockedBy } : {}),
+    ...(extra.recurringId ? { recurringId: extra.recurringId } : {}),
     createdAt: stamp, updatedAt: stamp, lastLogId: log.id
   };
   return { id, task, log, dropped };
@@ -413,18 +430,27 @@ function buildTask(draft, ownerId, status) {
 // Gives the same task to one or more people: one separate task for each person, so each can
 // move their own copy through the statuses. Returns the tasks created (and how many step
 // assignments had to be dropped because the person is not in that task's team).
+//
+// `draft.titles` (a list of titles) makes one task per title and per person: "add several at once".
 export async function createTasks(draft, ownerIds) {
   const people = [...new Set((ownerIds && ownerIds.length ? ownerIds : [draft.ownerId]).filter(Boolean))];
-  const problem = validateTaskDraft({ ...draft, ownerId: people[0] || '' });
+  const titles = (draft.titles && draft.titles.length ? draft.titles : [draft.title]).map((t) => String(t || '').trim()).filter(Boolean);
+  const problem = validateTaskDraft({ ...draft, title: titles[0] || '', ownerId: people[0] || '' });
   if (problem) throw new Error(problem);
-  if (people.length > MAX_ASSIGNEES) throw new Error(`Please choose at most ${MAX_ASSIGNEES} people at a time.`);
+  const tooLong = titles.find((t) => t.length > 200);
+  if (tooLong) throw new Error('One of the titles is too long (200 characters at most).');
+  const missing = missingForNew(draft);
+  if (missing.length) throw new Error(missing.join(' '));
+  if (people.length * titles.length > MAX_ASSIGNEES) {
+    throw new Error(`That would create ${people.length * titles.length} tasks. Please keep it to ${MAX_ASSIGNEES} or fewer at a time.`);
+  }
   if (people.length > 1 && perm.isMember(state.user) && !perm.ownsProject(state.user, draft.projectId)) {
     throw new Error('Only an Assistant Team Leader or above can give a task to other people.');
   }
   const status = statusById(draft.status || INITIAL_STATUS_ID);
   if (!status) throw new Error('The default statuses are not set up yet. Ask the Director to set them up.');
 
-  const built = people.map((ownerId) => buildTask(draft, ownerId, status));
+  const built = titles.flatMap((title) => people.map((ownerId) => buildTask(draft, ownerId, status, { title })));
   const created = [];
   let dropped = 0;
   for (let i = 0; i < built.length; i += CREATE_CHUNK) {
@@ -485,11 +511,15 @@ export async function updateTask(original, draft) {
     checklist: steps,
     projectId: cleanText(next.projectId), startDate: cleanText(next.startDate),
     dueDate: cleanText(next.dueDate), estimateHours: cleanNum(next.estimateHours),
-    statusNote: cleanText(next.statusNote), description: next.description || ''
+    statusNote: cleanText(next.statusNote), description: next.description || '',
+    tags: cleanTags(next.tags), blockedBy: [...new Set(next.blockedBy || [])].slice(0, MAX_BLOCKERS)
   };
+  if (normalised.blockedBy.includes(original.id)) throw new Error('A task cannot wait for itself.');
 
   // Compare steps in one canonical form so key order in stored data never shows up as a change.
-  const changes = diffFields({ ...original, checklist: cleanSteps(original.checklist) }, normalised, TRACKED_TASK_FIELDS, resolveForLog);
+  const changes = diffFields({
+    ...original, checklist: cleanSteps(original.checklist), tags: original.tags || [], blockedBy: original.blockedBy || []
+  }, normalised, TRACKED_TASK_FIELDS, resolveForLog);
   if (!changes.length) return null;
 
   const stamp = backend.ts();
@@ -519,6 +549,8 @@ export async function updateTask(original, draft) {
     if (status.category === 'review' && original.statusCategory !== 'review') patch.submits = (original.submits || 0) + 1;
     if (status.id === 'rework') patch.reworks = (original.reworks || 0) + 1;
   }
+  // Handing the task to someone else: remember who and when (their "new for you" alert).
+  if (patch.ownerId) { patch.assignedBy = state.user.id; patch.assignedAt = stamp; }
   patch.updatedAt = stamp;
   patch.lastLogId = log.id;
 
@@ -1050,6 +1082,203 @@ export async function loadLog({ teamId = null, actorId = null, fromISO = null, t
   if (fromISO) where.push(['ts', '>=', new Date(fromISO + 'T00:00:00')]);
   if (toISO) where.push(['ts', '<=', new Date(toISO + 'T23:59:59.999')]);
   return backend.query('activityLog', { where, orderBy: [['ts', 'desc']], limit: pageSize, after });
+}
+
+// ---------------------------------------------------------------- availability (task form)
+//
+// When someone picks an owner and a due date, the form can warn "Raj is on leave that day".
+// Only people who may read their team's leave get this (Assistant Team Leader and above); the
+// warning never says what kind of leave it is. Leave and holidays are kept for 5 minutes.
+
+const AVAIL_TTL = 5 * 60 * 1000;
+const availLeave = new Map();                    // teamId -> { at, docs }
+let availHolidays = { at: 0, docs: [], user: null };
+
+export async function availabilityData(teamIds) {
+  const user = state.user;
+  if (!user || !perm.isDeputyUp(user)) return { leaves: [], holidays: [] };
+  const now = Date.now();
+  const leaves = [];
+  for (const id of [...new Set(teamIds.filter(Boolean))]) {
+    if (!perm.isDirector(user) && !perm.inTeam(user, id)) continue;   // the rules would refuse it
+    let hit = availLeave.get(id);
+    if (!hit || now - hit.at > AVAIL_TTL || hit.user !== user.id) {
+      try { hit = { at: now, user: user.id, docs: await loadTeamLeave(id, todayISO()) }; } catch { hit = { at: now, user: user.id, docs: [] }; }
+      availLeave.set(id, hit);
+    }
+    leaves.push(...hit.docs);
+  }
+  if (availHolidays.user !== user.id || now - availHolidays.at > AVAIL_TTL) {
+    try { availHolidays = { at: now, user: user.id, docs: await loadHolidays(todayISO()) }; } catch { availHolidays = { at: now, user: user.id, docs: [] }; }
+  }
+  return { leaves, holidays: availHolidays.docs };
+}
+
+// ---------------------------------------------------------------- task templates and recurring tasks
+//
+// A template is a saved task. With a repeat (weekly, monthly ...) the Planner makes the task for
+// you. There is no server, so it happens when a Team Leader, Manager or Director opens the app:
+// the task and the template's new "next date" are written together, so each occurrence is made
+// once, and a fixed task id makes a second attempt fail instead of making a duplicate.
+
+export const canUseTemplates = (u) => perm.isDeputyUp(u);        // pick one when creating a task
+export const canManageTemplates = (u) => perm.isLeaderUp(u);     // create, edit, switch on and off
+const TEMPLATE_TTL = 10 * 60 * 1000;
+export const templates = { list: [], at: 0, userId: null };
+const TRACKED_TEMPLATE_FIELDS = [
+  'name', 'teamId', 'title', 'description', 'priority', 'projectId', 'estimateHours', 'dueInDays', 'tags',
+  'checklist', 'ownerIds', 'repeat', 'nextDate', 'active'
+];
+
+export async function loadTemplates({ force = false } = {}) {
+  const user = state.user;
+  if (!user || !canUseTemplates(user)) return [];
+  if (!force && templates.userId === user.id && templates.at && Date.now() - templates.at < TEMPLATE_TTL) return templates.list;
+  const docs = perm.isDirector(user)
+    ? (await backend.query('taskTemplates', { where: [] })).docs
+    : (await Promise.all(myTeams().map((t) => backend.query('taskTemplates', { where: [['teamId', '==', t.id]] })))).flatMap((r) => r.docs);
+  templates.list = docs.sort((a, b) => a.name.localeCompare(b.name));
+  templates.at = Date.now();
+  templates.userId = user.id;
+  return templates.list;
+}
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+export function validateTemplateDraft(d) {
+  if (!(d.name || '').trim()) return 'Please give the template a name.';
+  if (d.name.trim().length > 100) return 'The template name is too long (100 characters at most).';
+  if (!(d.title || '').trim()) return 'Please give the task a title.';
+  if (d.title.trim().length > 200) return 'The title is too long (200 characters at most).';
+  if (!d.teamId) return 'Please choose a team.';
+  const owners = d.ownerIds || [];
+  if (!owners.length) return 'Please choose who gets the task.';
+  if (owners.length > MAX_TEMPLATE_OWNERS) return `A template can give the task to at most ${MAX_TEMPLATE_OWNERS} people.`;
+  if (!REPEATS.includes(d.repeat)) return 'Please choose how often it repeats.';
+  if (d.repeat !== 'none' && !DAY_RE.test(d.nextDate || '')) return 'Please choose the date of the first task.';
+  if (d.dueInDays !== '' && d.dueInDays !== null && d.dueInDays !== undefined) {
+    const n = Number(d.dueInDays);
+    if (!Number.isInteger(n) || n < 0 || n > 365) return '"Due after" must be a whole number of days from 0 to 365.';
+  }
+  if (d.estimateHours !== '' && d.estimateHours !== null && d.estimateHours !== undefined && (isNaN(Number(d.estimateHours)) || Number(d.estimateHours) < 0)) {
+    return 'The estimate must be a number of hours (0 or more).';
+  }
+  return null;
+}
+
+export async function saveTemplate(existing, draft) {
+  const problem = validateTemplateDraft(draft);
+  if (problem) throw new Error(problem);
+  const steps = (draft.checklist || []).map((c) => ({ id: c.id, text: String(c.text || '').trim().slice(0, 200) })).filter((c) => c.text).slice(0, 60);
+  const next = {
+    name: draft.name.trim(), teamId: draft.teamId, title: draft.title.trim(), description: draft.description || '',
+    priority: draft.priority || 'medium', projectId: cleanText(draft.projectId), estimateHours: cleanNum(draft.estimateHours),
+    dueInDays: draft.dueInDays === '' || draft.dueInDays === null || draft.dueInDays === undefined ? null : Number(draft.dueInDays),
+    tags: cleanTags(draft.tags), checklist: steps, ownerIds: [...new Set(draft.ownerIds)],
+    repeat: draft.repeat, nextDate: draft.repeat === 'none' ? null : draft.nextDate,
+    active: draft.active !== false
+  };
+  next.anchorDay = next.nextDate ? Number(next.nextDate.slice(8)) : null;
+  const stamp = backend.ts();
+  if (!existing) {
+    const id = backend.newId('taskTemplates');
+    const log = makeLog({
+      action: 'template.create', entityType: 'template', entityId: id, entityTitle: next.name, teamId: next.teamId,
+      changes: [{ field: 'repeat', from: '', to: next.repeat }, ...(next.nextDate ? [{ field: 'nextDate', from: '', to: next.nextDate }] : [])]
+    });
+    const doc = { ...next, lastRunDate: null, createdBy: state.user.id, createdAt: stamp, updatedAt: stamp, lastLogId: log.id };
+    await backend.commit([{ type: 'set', path: 'taskTemplates/' + id, data: doc }, log.op]);
+    const local = { id, ...doc, createdAt: new Date(), updatedAt: new Date() };
+    templates.list = [...templates.list, local].sort((a, b) => a.name.localeCompare(b.name));
+    emit('templates');
+    return local;
+  }
+  const changes = diffFields({ ...existing, tags: existing.tags || [], checklist: existing.checklist || [] }, next, TRACKED_TEMPLATE_FIELDS, resolveForLog);
+  if (!changes.length) return null;
+  const log = makeLog({ action: 'template.update', entityType: 'template', entityId: existing.id, entityTitle: next.name, teamId: next.teamId, changes });
+  const patch = { updatedAt: stamp, lastLogId: log.id, anchorDay: next.anchorDay };
+  for (const c of changes) patch[c.field] = next[c.field];
+  await backend.commit([{ type: 'update', path: 'taskTemplates/' + existing.id, data: patch }, log.op]);
+  const local = { ...existing, ...patch, updatedAt: new Date() };
+  templates.list = templates.list.map((t) => (t.id === existing.id ? local : t)).sort((a, b) => a.name.localeCompare(b.name));
+  emit('templates');
+  return local;
+}
+
+// {month}, {year} and {date} in a template's title or description become the occurrence's date.
+export function fillTokens(text, iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const month = new Date(y, m - 1, d).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  return String(text || '').replaceAll('{month}', month).replaceAll('{year}', String(y))
+    .replaceAll('{date}', new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }));
+}
+
+// The form's draft for a template (used by "Start from a template" and by the generator).
+export function draftFromTemplate(tpl, iso = todayISO()) {
+  return {
+    title: fillTokens(tpl.title, iso), description: fillTokens(tpl.description || '', iso),
+    teamId: tpl.teamId, projectId: tpl.projectId || '', priority: tpl.priority || 'medium',
+    estimateHours: tpl.estimateHours ?? '', startDate: iso, dueDate: dueDateFor(tpl, iso) || '',
+    tags: [...(tpl.tags || [])], blockedBy: [],
+    checklist: (tpl.checklist || []).map((c) => ({ id: c.id, text: fillTokens(c.text, iso), done: false }))
+  };
+}
+
+// Makes the tasks that are due from one template, and moves its next date on. Returns how many were made.
+async function makeOccurrence(tpl, due) {
+  const status = statusById(INITIAL_STATUS_ID);
+  if (!status) return 0;
+  const owners = (tpl.ownerIds || []).filter((id) => {
+    const u = userById(id);
+    return u && u.active !== false && (u.teamIds || []).includes(tpl.teamId);
+  });
+  if (!owners.length) return 0;
+  const draft = draftFromTemplate(tpl, due.date);
+  const built = owners.map((ownerId) => buildTask(draft, ownerId, status, {
+    id: occurrenceTaskId(tpl.id, due.date, ownerId), recurringId: tpl.id, recurringName: tpl.name
+  }));
+  const stamp = backend.ts();
+  const log = makeLog({
+    action: 'template.run', entityType: 'template', entityId: tpl.id, entityTitle: tpl.name, teamId: tpl.teamId,
+    changes: [
+      { field: 'nextDate', from: tpl.nextDate, to: due.next },
+      { field: 'recurring', from: '', to: `${owners.length} task${owners.length === 1 ? '' : 's'} for ${due.date}${due.skipped ? ` (${due.skipped} earlier skipped)` : ''}` }
+    ]
+  });
+  const patch = { nextDate: due.next, lastRunDate: due.date, updatedAt: stamp, lastLogId: log.id };
+  await backend.commit([
+    ...built.flatMap((b) => [{ type: 'set', path: 'tasks/' + b.id, data: b.task }, b.log.op]),
+    { type: 'update', path: 'taskTemplates/' + tpl.id, data: patch },
+    log.op
+  ]);
+  const now = new Date();
+  for (const b of built) state.tasks.set(b.id, { id: b.id, ...b.task, createdAt: now, updatedAt: now, assignedAt: now });
+  templates.list = templates.list.map((t) => (t.id === tpl.id ? { ...t, nextDate: due.next, lastRunDate: due.date } : t));
+  return built.length;
+}
+
+let recurringBusy = false;
+// Called when a Team Leader, Manager or Director opens the app (and from the Templates page).
+// Returns the number of tasks made. A failure (for example someone else just made them) is not an error.
+export async function runRecurring({ force = true } = {}) {
+  const user = state.user;
+  if (!user || recurringBusy || !perm.isLeaderUp(user)) return 0;
+  recurringBusy = true;
+  let made = 0;
+  try {
+    const today = todayISO();
+    for (const tpl of await loadTemplates({ force })) {
+      if (!perm.isDirector(user) && !perm.inTeam(user, tpl.teamId)) continue;
+      const due = dueOccurrence(tpl, today);
+      if (!due) continue;
+      try { made += await makeOccurrence(tpl, due); } catch (err) { console.warn('Recurring task skipped:', err?.message || err); }
+    }
+    if (made) { emit('tasks'); emit('templates'); }
+  } catch (err) {
+    console.warn('Could not check recurring tasks:', err?.message || err);
+  } finally {
+    recurringBusy = false;
+  }
+  return made;
 }
 
 export { toDate };

@@ -15,7 +15,9 @@ const FIELD_LABEL = {
   category: 'Category', color: 'Colour', order: 'Order', needsReason: 'Needs reason',
   email: 'Email', text: 'Comment',
   type: 'Type', endDate: 'To', half: 'Day part', reason: 'Reason', decisionNote: 'Decision note',
-  date: 'Date', userId: 'Person'
+  date: 'Date', userId: 'Person',
+  tags: 'Tags', blockedBy: 'Blocked by', recurring: 'Recurring', repeat: 'Repeats', nextDate: 'Next date',
+  ownerIds: 'People', dueInDays: 'Due after (days)'
 };
 
 export const fieldLabel = (f) => FIELD_LABEL[f] || f;

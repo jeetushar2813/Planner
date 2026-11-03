@@ -616,3 +616,165 @@ describe('leave entitlements and balances', () => {
     assert.deepEqual(doc, { year: '2026', days: { annual: 14, marriage: 3 }, overrides: { u1: { annual: 20 } } });
   });
 });
+
+// ------------------------------------------------------------------ task extras
+import { nextOccurrence, dueOccurrence, occurrenceTaskId, dueDateFor } from '../js/core/recurrence.js';
+import { cleanTag, cleanTags, tagCounts } from '../js/core/tags.js';
+import { openBlockers, wouldLoop } from '../js/core/deps.js';
+import { missingForNew, requiredHints, availabilityWarnings, DEFAULT_TASK_RULES } from '../js/core/taskrules.js';
+import { computeAlerts } from '../js/core/alerts.js';
+
+describe('recurring tasks', () => {
+  test('weekly and fortnightly steps', () => {
+    assert.equal(nextOccurrence('2026-11-02', 'weekly'), '2026-11-09');
+    assert.equal(nextOccurrence('2026-12-28', 'fortnightly'), '2027-01-11');
+    assert.equal(nextOccurrence('2026-11-02', 'none'), null);
+  });
+  test('monthly keeps the day of the month and uses the last day of short months', () => {
+    assert.equal(nextOccurrence('2026-01-31', 'monthly', 31), '2026-02-28');
+    assert.equal(nextOccurrence('2026-02-28', 'monthly', 31), '2026-03-31');
+    assert.equal(nextOccurrence('2028-01-31', 'monthly', 31), '2028-02-29');
+    assert.equal(nextOccurrence('2026-11-15', 'quarterly'), '2027-02-15');
+    assert.equal(nextOccurrence('2028-02-29', 'yearly', 29), '2029-02-28');
+    assert.equal(nextOccurrence('2026-12-15', 'monthly'), '2027-01-15');
+  });
+  test('nothing is due before its date, or when paused or manual', () => {
+    const t = { repeat: 'weekly', nextDate: '2026-11-10', active: true };
+    assert.equal(dueOccurrence(t, '2026-11-09'), null);
+    assert.equal(dueOccurrence({ ...t, active: false }, '2026-11-20'), null);
+    assert.equal(dueOccurrence({ ...t, repeat: 'none' }, '2026-11-20'), null);
+    assert.equal(dueOccurrence({ ...t, nextDate: null }, '2026-11-20'), null);
+  });
+  test('due on the day: one task and the next date moves on', () => {
+    assert.deepEqual(dueOccurrence({ repeat: 'weekly', nextDate: '2026-11-10', active: true }, '2026-11-10'),
+      { date: '2026-11-10', next: '2026-11-17', skipped: 0 });
+  });
+  test('after a long gap only the latest occurrence is made', () => {
+    const r = dueOccurrence({ repeat: 'weekly', nextDate: '2026-10-01', active: true }, '2026-11-12');
+    assert.deepEqual(r, { date: '2026-11-12', next: '2026-11-19', skipped: 6 });
+    const m = dueOccurrence({ repeat: 'monthly', nextDate: '2026-01-31', anchorDay: 31, active: true }, '2026-11-03');
+    assert.equal(m.date, '2026-10-31');
+    assert.equal(m.next, '2026-11-30');
+  });
+  test('task ids are fixed so a second attempt cannot make a duplicate', () => {
+    assert.equal(occurrenceTaskId('tpl1', '2026-11-10', 'mei'), 'rec-tpl1-2026-11-10-mei');
+    assert.equal(occurrenceTaskId('tpl1', '2026-11-10', 'mei'), occurrenceTaskId('tpl1', '2026-11-10', 'mei'));
+  });
+  test('due date is counted from the day the task is made', () => {
+    assert.equal(dueDateFor({ dueInDays: 5 }, '2026-11-10'), '2026-11-15');
+    assert.equal(dueDateFor({ dueInDays: 0 }, '2026-11-10'), '2026-11-10');
+    assert.equal(dueDateFor({ dueInDays: null }, '2026-11-10'), null);
+    assert.equal(dueDateFor({}, '2026-11-10'), null);
+  });
+});
+
+describe('tags', () => {
+  test('a tag is lower case, short, with no hash or spaces', () => {
+    assert.equal(cleanTag('#Admissions'), 'admissions');
+    assert.equal(cleanTag('  Open Day! '), 'open-day');
+    assert.equal(cleanTag('x'.repeat(40)).length, 24);
+    assert.equal(cleanTag('###'), '');
+  });
+  test('duplicates go, at most 8 stay', () => {
+    assert.deepEqual(cleanTags(['A', 'a', '#a', 'b']), ['a', 'b']);
+    assert.equal(cleanTags(Array.from({ length: 12 }, (_, i) => 't' + i)).length, 8);
+    assert.deepEqual(cleanTags(undefined), []);
+  });
+  test('counts are most used first', () => {
+    assert.deepEqual(tagCounts([{ tags: ['a', 'b'] }, { tags: ['b'] }, {}]), [['b', 2], ['a', 1]]);
+  });
+});
+
+describe('waiting for other tasks', () => {
+  const tasks = { a: { id: 'a', blockedBy: ['b'], statusCategory: 'todo' }, b: { id: 'b', blockedBy: ['c'], statusCategory: 'active' }, c: { id: 'c', statusCategory: 'done' }, d: { id: 'd', statusCategory: 'todo', archived: true } };
+  const look = (id) => tasks[id] || null;
+  test('only unfinished blockers count; unknown ones are reported', () => {
+    assert.deepEqual(openBlockers({ blockedBy: ['b', 'c', 'd', 'zzz'] }, look).open.map((t) => t.id), ['b']);
+    assert.equal(openBlockers({ blockedBy: ['b', 'zzz'] }, look).unknown, 1);
+    assert.deepEqual(openBlockers({}, look), { open: [], unknown: 0 });
+  });
+  test('loops are caught, also through a chain', () => {
+    assert.equal(wouldLoop('c', 'a', look), true);   // a -> b -> c, so c cannot wait for a
+    assert.equal(wouldLoop('a', 'c', look), false);
+    assert.equal(wouldLoop('b', 'b', look), true);
+    assert.equal(wouldLoop(null, 'a', look), false);
+  });
+});
+
+describe('what a new task must have', () => {
+  test('the default is a due date and nothing else', () => {
+    assert.equal(DEFAULT_TASK_RULES.requireDueDate, true);
+    assert.deepEqual(missingForNew({ title: 'x', priority: 'urgent' }), ['Please set a due date.']);
+    assert.deepEqual(missingForNew({ title: 'x', priority: 'low', dueDate: '2026-11-10' }), []);
+  });
+  test('estimate can be needed for every task or from a priority up', () => {
+    const base = { dueDate: '2026-11-10', priority: 'medium' };
+    assert.deepEqual(missingForNew(base, { requireEstimate: true }), ['Please give an estimate in hours.']);
+    assert.deepEqual(missingForNew(base, { requireEstimateFrom: 'high' }), []);
+    assert.equal(missingForNew({ ...base, priority: 'high' }, { requireEstimateFrom: 'high' }).length, 1);
+    assert.equal(missingForNew({ ...base, priority: 'high', estimateHours: 0 }, { requireEstimateFrom: 'high' }).length, 0);
+  });
+  test('project and description', () => {
+    assert.equal(missingForNew({ dueDate: 'x', projectId: '' }, { requireProject: true }).length, 1);
+    assert.equal(missingForNew({ dueDate: 'x', description: '  ' }, { requireDescription: true }).length, 1);
+    assert.deepEqual(requiredHints({ priority: 'urgent' }, { requireDueDate: true, requireEstimateFrom: 'high' }),
+      { dueDate: true, estimate: true, project: false, description: false });
+  });
+});
+
+describe('warnings for the due date', () => {
+  const mei = { id: 'mei', name: 'Mei Ling', teamIds: ['t1'] };
+  const raj = { id: 'raj', name: 'Raj Singh', teamIds: ['t1'] };
+  const data = { leaves: [leave('mei', WED, WED), leave('raj', WED, WED, { half: 'am' }), leave('mei', TUE, TUE, { status: 'pending' })], holidays: [{ name: 'Founders Day', date: NEXT_MON, teamId: null, active: true }] };
+  const OK = (iso) => iso; // dates in the test are in the future of "today" only if today is earlier; make them safe:
+  test('leave, half-day leave, weekend and holiday are named; the leave type never is', () => {
+    const far = (iso) => addDays(iso, 4004);                       // 4004 = 572 weeks: keeps the weekday, puts every date in the future
+    const farData = {
+      leaves: data.leaves.map((l) => ({ ...l, startDate: far(l.startDate), endDate: far(l.endDate) })),
+      holidays: data.holidays.map((h) => ({ ...h, date: far(h.date) }))
+    };
+    assert.match(availabilityWarnings([mei, raj], far(WED), farData).join(' '), /Mei Ling is on leave/);
+    assert.match(availabilityWarnings([mei, raj], far(WED), farData).join(' '), /Raj Singh is on half-day leave/);
+    assert.deepEqual(availabilityWarnings([mei], far(TUE), farData), []);                  // pending leave does not count
+    assert.match(availabilityWarnings([mei], far(SAT), farData)[0], /weekend/);
+    assert.match(availabilityWarnings([mei, raj], far(NEXT_MON), farData)[0], /Founders Day/);
+    assert.equal(availabilityWarnings([mei, raj], far(NEXT_MON), farData).length, 1);      // one holiday line for everybody
+    assert.ok(!/annual/i.test(availabilityWarnings([mei], far(WED), farData).join(' ')));
+    assert.deepEqual(availabilityWarnings([mei], '', farData), []);
+    assert.deepEqual(availabilityWarnings([mei], '2020-01-01', farData), []);              // dates in the past are not checked
+    assert.ok(OK(MON));
+  });
+});
+
+describe('alerts', () => {
+  const me = { id: 'me' };
+  const at = (d) => new Date(d);
+  const task = (id, over = {}) => ({ id, ownerId: 'me', statusCategory: 'todo', archived: false, createdBy: 'boss', createdAt: at('2026-11-03T08:00:00Z'), dueDate: null, ...over });
+  const seenAt = at('2026-11-03T09:00:00Z').getTime();
+  const today = '2026-11-10';
+  test('given to you after you last looked', () => {
+    const r = computeAlerts([task('new', { assignedBy: 'boss', assignedAt: at('2026-11-03T10:00:00Z') }), task('old'), task('mine', { createdBy: 'me', createdAt: at('2026-11-03T11:00:00Z') })], me, { seenAt, today });
+    assert.deepEqual(r.assigned.map((t) => t.id), ['new']);
+    assert.equal(r.count, 1);
+  });
+  test('a task handed over later counts again', () => {
+    const t = task('re', { createdAt: at('2026-10-01T00:00:00Z'), assignedBy: 'lead', assignedAt: at('2026-11-04T00:00:00Z') });
+    assert.equal(computeAlerts([t], me, { seenAt, today }).assigned.length, 1);
+  });
+  test('overdue and due within two days', () => {
+    const r = computeAlerts([task('o', { dueDate: '2026-11-09' }), task('t', { dueDate: '2026-11-10' }), task('s', { dueDate: '2026-11-12' }), task('l', { dueDate: '2026-11-13' })], me, { seenAt: Date.now(), today });
+    assert.deepEqual(r.overdue.map((t) => t.id), ['o']);
+    assert.deepEqual(r.dueSoon.map((t) => t.id), ['t', 's']);
+    assert.equal(r.count, 3);
+  });
+  test('finished, archived and other people\'s tasks are ignored; a task is counted once', () => {
+    const r = computeAlerts([
+      task('done', { statusCategory: 'done', dueDate: '2026-11-01' }), task('arch', { archived: true, dueDate: '2026-11-01' }),
+      task('other', { ownerId: 'x', dueDate: '2026-11-01' }),
+      task('both', { dueDate: '2026-11-11', assignedBy: 'boss', assignedAt: at('2026-11-05T00:00:00Z') })
+    ], me, { seenAt, today });
+    assert.equal(r.count, 1);
+    assert.equal(r.assigned.length, 1);
+    assert.equal(r.dueSoon.length, 1);
+  });
+});

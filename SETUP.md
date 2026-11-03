@@ -117,6 +117,49 @@ Each new version changes some files. To update:
 
 ### This version (Calendar, Leave, Team overview, Reports, Project owners, My profile and themes)
 
+- **Templates, recurring tasks, tags, "waiting for", alerts and required fields: the rules changed again, so publish
+  `firestore.rules` once more** (Firestore > Rules > paste > Publish) **before** you use any of it. Until you do, Templates will
+  show "Missing or insufficient permissions", and saving a task with tags or "waiting for" is refused. No new index is needed.
+- **Required fields.** A new task now needs a **due date**. To change this, add `taskRules` to `appSettings` in `js/config.js`
+  (the app works without it; these are the defaults):
+
+```js
+taskRules: {
+  requireDueDate: true,        // every new task needs a due date
+  requireEstimate: false,      // every new task needs an estimate in hours
+  requireEstimateFrom: '',     // ...or only from this priority up: 'medium', 'high' or 'urgent' ('' = never)
+  requireProject: false,
+  requireDescription: false
+}
+```
+
+  These are checked by the app when a task is created, not by the database, and older tasks without a due date still open and save normally.
+- **Leave and holiday warning.** On **New task** (and when you change an owner or due date), Assistant Team Leaders and above see a
+  yellow warning if the due date is a weekend, a public holiday, or a day the owner is on approved leave. It never says what kind
+  of leave, and you can still save. Members do not see it (they cannot read their colleagues' leave).
+- **Tags.** Up to 8 short tags on a task (type and press Enter). Team tasks and My tasks get an **Any tag** filter, and search also finds tags.
+- **Waiting for.** In a task, press **+ Add a task this one waits for** and pick up to 5 tasks of the same team or project. While any
+  of them is unfinished the task shows a "Waiting for N" chip, and moving it forward (In Progress, In Review or Completed) asks
+  you to confirm first. It is a warning, not a lock. Two tasks cannot wait for each other.
+- **Duplicate and add several.** Open a task and press **Duplicate** for a new task with the same details (no due date, steps
+  un-ticked). On **New task**, **Add several tasks at once** creates one task per line, for each person ticked (at most 30 in one go).
+- **Templates and recurring tasks (Team Leader, Manager, Director).** Open **Templates** > **+ New template**: name, team, the title
+  (you can use `{month}`, `{year}` and `{date}`), who gets it (up to 5 people, each gets their own task), steps, tags, due after N
+  days, and **Repeats** (weekly, every 2 weeks, monthly, every 3 months, yearly, or not at all). Assistant Team Leaders can start a
+  task from a template on **New task** (**Start from a template**). **Use now** on the Templates page does the same.
+  - There is no server, so a repeating template makes its task **when a Team Leader, Manager or Director of that team (or the
+    Director) opens the app** on or after its date. Open the app on the 1st and the monthly report is waiting.
+  - If several dates were missed (for example everyone was on holiday), only the **latest** one is made, not a pile of old tasks.
+  - Each occurrence is made once even if two leaders open the app at the same moment (the task gets a fixed id).
+  - **Pause** stops it; **Resume** skips the dates that went by. Every run is in the Activity log ("Made a recurring task").
+- **Alerts.** The **Alerts** button in the top bar shows tasks someone gave you since you last pressed **Mark new as seen**, tasks that
+  are overdue, and tasks due within 2 days. It is worked out from your own open tasks, so it adds no database reads or writes. "Seen" is
+  remembered in that browser only. There is no email or phone notification: the free plan has no server to send them.
+- Limits worth knowing: the database cannot check each tag's length or what is inside a "waiting for" list (the app does); a task you
+  wait for that you have not loaded shows as "Another task"; the template checks run on the day someone opens the app, not at midnight.
+- Recommended: run `npm run test:rules` on your Mac. It now also checks the template rules, the tag and "waiting for" fields, and the
+  recurring-task write. (I could not run the rules tests in my own environment, so please run them once after publishing and tell me if anything fails.)
+
 - **HR role, yearly leave entitlements and the two-step leave approval: the rules changed, so publish `firestore.rules` again**
   (Firestore > Rules > paste > Publish) **before** you use any of this. Until you do, approving leave, acknowledging leave and
   saving entitlements are refused with "Missing or insufficient permissions". No new index is needed.

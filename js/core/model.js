@@ -76,7 +76,10 @@ export const ACTION_LABEL = {
   'leave.ack': 'HR acknowledged leave',
   'policy.update': 'Updated leave entitlements',
   'holiday.create': 'Added holiday',
-  'holiday.update': 'Edited holiday'
+  'holiday.update': 'Edited holiday',
+  'template.create': 'Created task template',
+  'template.update': 'Edited task template',
+  'template.run': 'Made a recurring task'
 };
 
 export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy'];

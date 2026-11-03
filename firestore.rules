@@ -102,6 +102,14 @@ service cloud.firestore {
           // Who may tick the steps. Kept by the web page from the steps themselves.
           && (!('checklistAssignees' in d) || (d.checklistAssignees is list && d.checklistAssignees.size() <= 60))
           && (!('checklistForTeam' in d) || d.checklistForTeam is bool)
+          // Optional extras (older tasks do not have them): tags, "blocked by" tasks, who gave the
+          // task to its owner and when (used for the "new for you" alert), and the template a
+          // recurring task came from.
+          && (!('tags' in d) || (d.tags is list && d.tags.size() <= 8))
+          && (!('blockedBy' in d) || (d.blockedBy is list && d.blockedBy.size() <= 5))
+          && (!('assignedBy' in d) || d.assignedBy is string)
+          && (!('assignedAt' in d) || d.assignedAt is timestamp)
+          && (!('recurringId' in d) || d.recurringId is string)
           && d.archived is bool
           && d.submits is number && d.reworks is number;
       }
@@ -184,7 +192,7 @@ service cloud.firestore {
           && b.ownerId != request.auth.uid
           && changedKeys().hasOnly([
               'ownerId', 'teamId', 'status', 'statusCategory', 'statusNote', 'completedAt',
-              'completedDate', 'submits', 'reworks', 'updatedAt', 'lastLogId'
+              'completedDate', 'submits', 'reworks', 'assignedAt', 'assignedBy', 'updatedAt', 'lastLogId'
             ])
           && ((a.ownerId == b.ownerId && a.teamId == b.teamId) || ownerInTeam(a))
           && (a.statusCategory == b.statusCategory || b.statusCategory == 'review');
@@ -263,6 +271,66 @@ service cloud.firestore {
         // Comments are permanent so the discussion stays trustworthy.
         allow update, delete: if false;
       }
+    }
+
+    // -------------------------------------------------------- task templates
+    // A template is a saved task. It can repeat (weekly, monthly ...). With no server, the web page
+    // of a Team Leader, Manager or Director makes the task that is due when they open the app and
+    // moves the next date on in the same write, so each occurrence is made once.
+
+    match /taskTemplates/{templateId} {
+
+      function validTemplate(d) {
+        return d.keys().hasAll([
+            'name', 'teamId', 'title', 'description', 'priority', 'ownerIds', 'repeat',
+            'nextDate', 'active', 'createdBy', 'createdAt', 'updatedAt', 'lastLogId'
+          ])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+          && d.teamId is string
+          && d.title is string && d.title.size() > 0 && d.title.size() <= 200
+          && d.description is string && d.description.size() <= 5000
+          && d.priority in ['low', 'medium', 'high', 'urgent']
+          && d.ownerIds is list && d.ownerIds.size() >= 1 && d.ownerIds.size() <= 5
+          && d.repeat in ['none', 'weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly']
+          && (d.nextDate == null || (d.nextDate is string && d.nextDate.size() == 10))
+          && d.active is bool
+          && (!('projectId' in d) || d.projectId == null || d.projectId is string)
+          && (!('estimateHours' in d) || d.estimateHours == null || (d.estimateHours is number && d.estimateHours >= 0))
+          && (!('dueInDays' in d) || d.dueInDays == null || (d.dueInDays is number && d.dueInDays >= 0 && d.dueInDays <= 365))
+          && (!('tags' in d) || (d.tags is list && d.tags.size() <= 8))
+          && (!('checklist' in d) || (d.checklist is list && d.checklist.size() <= 60))
+          && (!('lastRunDate' in d) || d.lastRunDate == null || d.lastRunDate is string);
+      }
+
+      function manages(teamId) {
+        return isDirector() || (role() in ['manager', 'leader'] && inTeam(teamId));
+      }
+
+      // Read: the Director, and Team Leaders, Managers and Assistants of the template's team.
+      allow get, list: if active()
+        && (isDirector()
+            || (role() in ['manager', 'leader', 'asst_leader'] && inTeam(resource.data.teamId)));
+
+      allow create: if active()
+        && validTemplate(request.resource.data)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && manages(request.resource.data.teamId)
+        && logged('template', templateId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validTemplate(request.resource.data)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && manages(resource.data.teamId)
+        && manages(request.resource.data.teamId)
+        && logged('template', templateId, request.resource.data.lastLogId);
+
+      // Templates are switched off (active: false), never deleted.
+      allow delete: if false;
     }
 
     // ------------------------------------------------------------------ users
@@ -671,7 +739,7 @@ service cloud.firestore {
           && d.actorId == request.auth.uid
           && d.actorRole == role()
           && d.action is string && d.action.size() <= 40
-          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy']
+          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy', 'template']
           && d.entityId is string
           && d.entityTitle is string && d.entityTitle.size() <= 300
           && (d.teamId == null || d.teamId is string)

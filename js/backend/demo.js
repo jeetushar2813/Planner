@@ -282,6 +282,9 @@ function seed() {
         { id: 'c2', text: 'English version', done: true },
         { id: 'c3', text: 'Chinese version', done: false }
       ] : [],
+      ...(i === 0 ? { tags: ['chapters', 'qc'] } : {}),
+      ...(i === 1 ? { tags: ['chapters'], blockedBy: ['t01'] } : {}),
+      ...(i === 2 ? { tags: ['qc'] } : {}),
       archived: false,
       completedAt: done ? new Date(now.getTime() - 86400000 * 2) : null,
       completedDate: done ? day(dueOffset + 1) : null,
@@ -341,6 +344,19 @@ function seed() {
     year: thisYear, days: { annual: 14, sick: 14, hospitalization: 60, compassionate: 3, marriage: 3 },
     overrides: { raj: { annual: 18 } }, updatedAt: now, lastLogId: 'seed'
   });
+  // Task templates: one repeats every month, one every week, one is used by hand.
+  const template = (id, doc) => put('taskTemplates', id, {
+    description: '', priority: 'medium', projectId: null, estimateHours: null, tags: [], checklist: [], active: true,
+    lastRunDate: null, createdBy: 'lena', createdAt: now, updatedAt: now, lastLogId: 'seed', ...doc
+  });
+  template('tpl1', { name: 'Monthly attendance report', teamId: 'content', title: 'Attendance report for {month}', ownerIds: ['mei', 'omar'],
+    repeat: 'monthly', nextDate: day(5), anchorDay: Number(day(5).slice(8)), dueInDays: 5, estimateHours: 2, tags: ['report'],
+    checklist: [{ id: 's1', text: 'Collect attendance sheets' }, { id: 's2', text: 'Send to HR' }] });
+  template('tpl2', { name: 'Weekly build check', teamId: 'dev', title: 'Build check for {date}', ownerIds: ['raj'],
+    repeat: 'weekly', nextDate: day(2), anchorDay: null, dueInDays: 2, createdBy: 'devi' });
+  template('tpl3', { name: 'New chapter checklist', teamId: 'content', title: 'New chapter: ', ownerIds: ['mei'],
+    repeat: 'none', nextDate: null, anchorDay: null, dueInDays: 7, tags: ['chapters'],
+    checklist: [{ id: 's1', text: 'BM version' }, { id: 's2', text: 'English version' }, { id: 's3', text: 'Chinese version' }] });
   const holiday = (id, name, date, teamId) => put('holidays', id, { name, date, teamId, active: true, createdAt: now, lastLogId: 'seed' });
   holiday('hol1', 'Company day off (sample)', weekday(12), null);
   holiday('hol2', 'Content team offsite (sample)', weekday(6), 'content');
