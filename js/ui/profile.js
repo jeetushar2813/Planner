@@ -2,7 +2,7 @@
 // Changing the name, role or teams is for the Director (People page).
 
 import { h, clear, fmtDateTime } from '../core/util.js';
-import { ROLE_LABEL } from '../core/model.js';
+import { roleLabel } from '../core/model.js';
 import { THEMES, currentTheme } from '../core/theme.js';
 import {
   state, teamName, setMyTheme, changeMyPassword, validateNewPassword, PASSWORD_MIN, isDemo
@@ -26,7 +26,7 @@ export function renderProfile(container) {
       h('dl', { class: 'facts' },
         h('dt', null, 'Name'), h('dd', null, user.name),
         h('dt', null, 'Email'), h('dd', null, user.email),
-        h('dt', null, 'Role'), h('dd', null, ROLE_LABEL[user.role] || user.role),
+        h('dt', null, 'Role'), h('dd', null, roleLabel(user)),
         h('dt', null, 'Team'), h('dd', null, teams.length ? teams.join(', ') : 'No team'),
         h('dt', null, 'Last sign-in'), h('dd', null, user.lastLoginAt ? fmtDateTime(user.lastLoginAt) : 'This is your first visit')),
       h('p', { class: 'hint' }, 'To change your name, role or team, ask the Director.'));

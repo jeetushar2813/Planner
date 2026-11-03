@@ -15,6 +15,7 @@ import {
 import { diffFields, summarize, taskAction } from './log.js';
 import { todayISO, toDate } from './util.js';
 import * as perm from './perm.js';
+import { deriveStepFields, cleanSteps, dropOutsiders } from './steps.js';
 import { applyTheme, isTheme } from './theme.js';
 
 let backend = null;
@@ -201,8 +202,9 @@ function patchRef(kind, doc) {
   const list = state.ref[kind];
   const i = list.findIndex((x) => x.id === doc.id);
   if (i >= 0) list[i] = { ...list[i], ...doc }; else list.push(doc);
-  applyRef({ ...state.ref });
+  // Update our own record first, so screens that react to the 'ref' event already see it.
   if (kind === 'users' && doc.id === state.user.id) state.user = { ...state.user, ...doc };
+  applyRef({ ...state.ref });
   syncOwnedProjects();
   writeRefCache();
 }
@@ -348,7 +350,7 @@ export function validateTaskDraft(d) {
   if (!d.title || !d.title.trim()) return 'Please give the task a title.';
   if (d.title.trim().length > 200) return 'The title is too long (200 characters at most).';
   if (!d.teamId) return 'Please choose a team.';
-  if (!d.ownerId) return 'Please choose an owner.';
+  if (!d.ownerId) return 'Please choose who this task is for.';
   if (d.startDate && d.dueDate && d.dueDate < d.startDate) return 'The due date is before the start date.';
   if (d.estimateHours !== '' && d.estimateHours !== null && d.estimateHours !== undefined) {
     const n = Number(d.estimateHours);
@@ -360,19 +362,33 @@ export function validateTaskDraft(d) {
 const cleanNum = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
 const cleanText = (v) => (v === '' || v === undefined ? null : v);
 
-export async function createTask(draft) {
-  const problem = validateTaskDraft(draft);
-  if (problem) throw new Error(problem);
-  const status = statusById(draft.status || INITIAL_STATUS_ID);
-  if (!status) throw new Error('The default statuses are not set up yet. Ask the Director to set them up.');
+// The team a task goes to when it is given to this person. Normally the team chosen on the
+// form. A project owner can give work to anyone, so then the task follows the person: their
+// team if they are in the form's team, else the project's team, else their first team.
+export function teamForOwner(draft, ownerId) {
+  if (!perm.ownsProject(state.user, draft.projectId)) return draft.teamId;
+  const theirs = userById(ownerId)?.teamIds || [];
+  if (!theirs.length || theirs.includes(draft.teamId)) return draft.teamId;
+  const project = projectById(draft.projectId);
+  return theirs.includes(project?.teamId) ? project.teamId : theirs[0];
+}
 
+const teamIdsOf = (id) => userById(id)?.teamIds || [];
+// Several tasks are written in one batch. Each task costs the rules a few document reads and
+// a batch may use only 20, so a long list of people is written in chunks of this size.
+export const CREATE_CHUNK = 5;
+export const MAX_ASSIGNEES = 30;
+
+function buildTask(draft, ownerId, status) {
+  const teamId = teamForOwner(draft, ownerId);
+  const { steps, dropped } = dropOutsiders(cleanSteps(draft.checklist), teamId, teamIdsOf);
   const id = backend.newId('tasks');
   const stamp = backend.ts();
   const log = makeLog({
     action: 'task.create', entityType: 'task', entityId: id,
-    entityTitle: draft.title.trim(), teamId: draft.teamId,
+    entityTitle: draft.title.trim(), teamId,
     changes: [
-      { field: 'ownerId', from: '', to: userName(draft.ownerId) },
+      { field: 'ownerId', from: '', to: userName(ownerId) },
       { field: 'status', from: '', to: status.name },
       ...(draft.dueDate ? [{ field: 'dueDate', from: '', to: draft.dueDate }] : []),
       { field: 'priority', from: '', to: PRIORITY_LABEL[draft.priority || 'medium'] }
@@ -380,22 +396,64 @@ export async function createTask(draft) {
   });
   const task = {
     title: draft.title.trim(), description: draft.description || '',
-    teamId: draft.teamId, projectId: cleanText(draft.projectId), ownerId: draft.ownerId,
+    teamId, projectId: cleanText(draft.projectId), ownerId,
     createdBy: state.user.id,
     status: status.id, statusCategory: status.category, statusNote: null,
     priority: draft.priority || 'medium',
     startDate: cleanText(draft.startDate), dueDate: cleanText(draft.dueDate),
     estimateHours: cleanNum(draft.estimateHours),
-    checklist: draft.checklist || [], archived: false,
+    checklist: steps, ...deriveStepFields(steps), archived: false,
     completedAt: null, completedDate: null, submits: 0, reworks: 0,
     createdAt: stamp, updatedAt: stamp, lastLogId: log.id
   };
-  await backend.commit([{ type: 'set', path: 'tasks/' + id, data: task }, log.op]);
-  const now = new Date();
-  const local = { id, ...task, createdAt: now, updatedAt: now };
-  state.tasks.set(id, local);
+  return { id, task, log, dropped };
+}
+
+// Gives the same task to one or more people: one separate task for each person, so each can
+// move their own copy through the statuses. Returns the tasks created (and how many step
+// assignments had to be dropped because the person is not in that task's team).
+export async function createTasks(draft, ownerIds) {
+  const people = [...new Set((ownerIds && ownerIds.length ? ownerIds : [draft.ownerId]).filter(Boolean))];
+  const problem = validateTaskDraft({ ...draft, ownerId: people[0] || '' });
+  if (problem) throw new Error(problem);
+  if (people.length > MAX_ASSIGNEES) throw new Error(`Please choose at most ${MAX_ASSIGNEES} people at a time.`);
+  if (people.length > 1 && perm.isMember(state.user) && !perm.ownsProject(state.user, draft.projectId)) {
+    throw new Error('Only an Assistant Team Leader or above can give a task to other people.');
+  }
+  const status = statusById(draft.status || INITIAL_STATUS_ID);
+  if (!status) throw new Error('The default statuses are not set up yet. Ask the Director to set them up.');
+
+  const built = people.map((ownerId) => buildTask(draft, ownerId, status));
+  const created = [];
+  let dropped = 0;
+  for (let i = 0; i < built.length; i += CREATE_CHUNK) {
+    const chunk = built.slice(i, i + CREATE_CHUNK);
+    try {
+      await backend.commit(chunk.flatMap((b) => [{ type: 'set', path: 'tasks/' + b.id, data: b.task }, b.log.op]));
+    } catch (err) {
+      if (created.length) {
+        emit('tasks');
+        throw new Error(`${created.length} of ${built.length} tasks were created (for ${created.map((t) => userName(t.ownerId)).join(', ')}). `
+          + `The rest were not: ${err.message || err}. Open the list to check, then add the missing ones.`);
+      }
+      throw err;
+    }
+    const now = new Date();
+    for (const b of chunk) {
+      const local = { id: b.id, ...b.task, createdAt: now, updatedAt: now };
+      state.tasks.set(b.id, local);
+      created.push(local);
+      dropped += b.dropped;
+    }
+  }
   emit('tasks');
-  return local;
+  created.droppedSteps = dropped;
+  return created;
+}
+
+export async function createTask(draft) {
+  const [task] = await createTasks(draft, [draft.ownerId]);
+  return task;
 }
 
 // Saves only what changed, together with its log entry, in one write.
@@ -417,14 +475,20 @@ export async function updateTask(original, draft) {
     if (!status.needsReason) next.statusNote = null;
   }
 
+  // Steps: only the allowed keys, and nobody keeps a step in a team they are not part of.
+  let steps = cleanSteps(next.checklist);
+  if (next.teamId !== original.teamId) steps = dropOutsiders(steps, next.teamId, teamIdsOf).steps;
+
   const normalised = {
     ...next,
+    checklist: steps,
     projectId: cleanText(next.projectId), startDate: cleanText(next.startDate),
     dueDate: cleanText(next.dueDate), estimateHours: cleanNum(next.estimateHours),
     statusNote: cleanText(next.statusNote), description: next.description || ''
   };
 
-  const changes = diffFields(original, normalised, TRACKED_TASK_FIELDS, resolveForLog);
+  // Compare steps in one canonical form so key order in stored data never shows up as a change.
+  const changes = diffFields({ ...original, checklist: cleanSteps(original.checklist) }, normalised, TRACKED_TASK_FIELDS, resolveForLog);
   if (!changes.length) return null;
 
   const stamp = backend.ts();
@@ -436,6 +500,15 @@ export async function updateTask(original, draft) {
   // Send only the fields that changed, plus what the system derives.
   const patch = {};
   for (const c of changes) patch[c.field] = normalised[c.field];
+  // Keep the two summary fields in step with the checklist, but send them only when they change
+  // (a person ticking their own step may not touch them).
+  if (patch.checklist) {
+    const derived = deriveStepFields(steps);
+    if (JSON.stringify(original.checklistAssignees || []) !== JSON.stringify(derived.checklistAssignees)) {
+      patch.checklistAssignees = derived.checklistAssignees;
+    }
+    if ((original.checklistForTeam === true) !== derived.checklistForTeam) patch.checklistForTeam = derived.checklistForTeam;
+  }
   if (statusChanged) {
     patch.statusCategory = status.category;
     const wasDone = original.statusCategory === 'done';
@@ -484,7 +557,7 @@ export async function addComment(task, text) {
 
 // ----------------------------------------------------------------------- people
 
-export async function createPerson({ name, email, role, teamIds, password, sendReset }) {
+export async function createPerson({ name, email, role, teamIds, password, sendReset, superuser = false }) {
   if (!name.trim()) throw new Error('Please enter a name.');
   if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error('Please enter a valid email address.');
   if (!password || password.length < 8) throw new Error('The temporary password needs at least 8 characters.');
@@ -497,11 +570,13 @@ export async function createPerson({ name, email, role, teamIds, password, sendR
     teamId: teamIds[0] ?? null,
     changes: [
       { field: 'role', from: '', to: ROLE_LABEL[role] },
-      { field: 'teamIds', from: '', to: teamIds.map(teamName).join(', ') }
+      { field: 'teamIds', from: '', to: teamIds.map(teamName).join(', ') },
+      ...(superuser ? [{ field: 'superuser', from: '', to: 'yes' }] : [])
     ]
   });
   const doc = {
     name: name.trim(), email: email.trim(), role, teamIds, active: true,
+    ...(superuser ? { superuser: true } : {}),
     createdAt: backend.ts(), lastLoginAt: null, lastLogId: log.id
   };
   try {
@@ -515,9 +590,21 @@ export async function createPerson({ name, email, role, teamIds, password, sendR
   return uid;
 }
 
+// Would this account still have Director powers after the change? Used to stop a person
+// from taking their own admin access away by mistake (firestore.rules checks the same thing).
+export const keepsFullPower = (u) => u.role === 'director' || u.superuser === true;
+
 export async function updatePerson(user, patch) {
-  const next = { ...user, ...patch };
-  const changes = diffFields(user, next, ['name', 'role', 'teamIds', 'active'], resolveForLog);
+  const before = { ...user, superuser: user.superuser === true };
+  const next = { ...before, ...patch };
+  if (patch.superuser !== undefined) next.superuser = patch.superuser === true;
+  if (user.id === state.user.id) {
+    if (next.active === false) throw new Error('You cannot deactivate your own account.');
+    if (!keepsFullPower(next)) {
+      throw new Error('That would remove your own admin powers. Tick "Superuser access" first, or ask another Director or Superuser to change your role.');
+    }
+  }
+  const changes = diffFields(before, next, ['name', 'role', 'teamIds', 'active', 'superuser'], resolveForLog);
   if (!changes.length) return;
   const log = makeLog({
     action: 'user.update', entityType: 'user', entityId: user.id, entityTitle: next.name,

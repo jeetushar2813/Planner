@@ -8,7 +8,8 @@
 import {
   h, add, clear, todayISO, addDays, fmtDate, fmtWeekday, fmtAgo, toDate, eachDay, startOfWeek
 } from '../core/util.js';
-import { ROLE_LABEL, LEAVE_TYPE_LABEL, OPEN_CATEGORIES } from '../core/model.js';
+import { roleLabel, LEAVE_TYPE_LABEL, OPEN_CATEGORIES } from '../core/model.js';
+import * as perm from '../core/perm.js';
 import {
   weekStartsOn, dayStatus, capacity, dayFlags, FLAG_TEXT, ownerAwayOnDue, nextLeave, leaveWorkdays, isApproved
 } from '../core/calendar.js';
@@ -105,7 +106,7 @@ export function renderOverview(container) {
       select([4, 8, 12].map((n) => ({ value: n, label: `Last ${n} weeks` })), f.weeks,
         { 'aria-label': 'Period', onchange: (e) => { f.weeks = Number(e.target.value); load(); } }));
   }
-  const perm_isDirector = () => user.role === 'director';
+  const perm_isDirector = () => perm.isDirector(user);
 
   // ------------------------------------------------------------------- paint
   function paint() {
@@ -343,7 +344,7 @@ export function renderOverview(container) {
           const lv = loginLevel(p);
           return h('tr', { class: f.personId === p.id ? 'row-selected' : '' },
             h('td', null, h('button', { type: 'button', class: 'link-btn person-btn', onclick: () => { f.personId = f.personId === p.id ? '' : p.id; paint(); } },
-              avatar(p.name, 22), ' ', p.name), h('div', { class: 'sub muted' }, ROLE_LABEL[p.role])),
+              avatar(p.name, 22), ' ', p.name), h('div', { class: 'sub muted' }, roleLabel(p))),
             h('td', null, todayChip(p)),
             h('td', { class: 'num' }, s.open),
             h('td', { class: 'num' }, s.overdue ? h('span', { class: 'due due-overdue' }, String(s.overdue)) : '0'),

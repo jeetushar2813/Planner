@@ -3,17 +3,20 @@
 
 import { ROLE_LEVEL } from './model.js';
 
-export const isDirector = (u) => u?.role === 'director';
+// A Superuser has every power of the Director while keeping their own role. Only a Director or
+// another Superuser can switch it on (People page), and it is enforced in firestore.rules.
+export const isSuperuser = (u) => u?.superuser === true;
+export const isDirector = (u) => u?.role === 'director' || isSuperuser(u);
 export const isManager = (u) => u?.role === 'manager';
 export const isLeader = (u) => u?.role === 'leader';
 export const isDeputy = (u) => u?.role === 'asst_leader';
-export const isMember = (u) => u?.role === 'member';
+export const isMember = (u) => u?.role === 'member' && !isSuperuser(u);
 
 // "Leader and above" in the planning document = Team Leader, Manager, Director.
-export const isLeaderUp = (u) => ROLE_LEVEL[u?.role] >= ROLE_LEVEL.leader;
+export const isLeaderUp = (u) => isSuperuser(u) || ROLE_LEVEL[u?.role] >= ROLE_LEVEL.leader;
 
 // Anyone who can lead work: adds the Assistant Team Leader.
-export const isDeputyUp = (u) => ROLE_LEVEL[u?.role] >= ROLE_LEVEL.asst_leader;
+export const isDeputyUp = (u) => isSuperuser(u) || ROLE_LEVEL[u?.role] >= ROLE_LEVEL.asst_leader;
 
 export const teamIdsOf = (u) => (u?.teamIds || []);
 export const inTeam = (u, teamId) => teamIdsOf(u).includes(teamId);
@@ -90,10 +93,28 @@ export function canChangeStatus(user, task, statuses, team) {
   return allowedStatuses(user, task, statuses, team).length > 0;
 }
 
-export function canTickChecklist(user, task) {
+// Steps given to someone: they (or, for a step given to the whole team, anyone in the task's
+// team) may tick it while the task is still open. Nothing else on the task.
+export function isStepHelper(user, task, item) {
+  return !!item && !['done', 'closed'].includes(task.statusCategory) && inTeam(user, task.teamId)
+    && (item.assigneeId === user.id || (item.forTeam === true && !item.assigneeId));
+}
+
+function canTickAllSteps(user, task) {
   if (isMember(user)) return task.ownerId === user.id && !['done', 'closed'].includes(task.statusCategory);
   return canEditDetails(user, task) || task.ownerId === user.id;
 }
+
+export function canTickItem(user, task, item) {
+  return canTickAllSteps(user, task) || isStepHelper(user, task, item);
+}
+
+export function canTickChecklist(user, task) {
+  return canTickAllSteps(user, task) || (task.checklist || []).some((i) => isStepHelper(user, task, i));
+}
+
+// Who may give steps to people: the same people who edit the task's details.
+export const canAssignSteps = canEditDetails;
 
 export function canComment(user, task) { return canViewTask(user, task); }
 

@@ -3,6 +3,7 @@
 import { h, clear, todayISO, addDays, daysBetween, fmtDate, debounce } from '../core/util.js';
 import { OPEN_CATEGORIES, PRIORITIES, PRIORITY_LABEL, PRIORITY_RANK } from '../core/model.js';
 import * as perm from '../core/perm.js';
+import { stepsForUser } from '../core/steps.js';
 import {
   state, bus, myTeams, teamById, statusById, userName, projectName, activeStatuses,
   watchMyTasks, loadOpenTasks, loadFinished, loadRefData
@@ -36,6 +37,12 @@ export function dueLabel(task) {
   return h('span', { class: 'due' }, text);
 }
 
+// "2 steps for you": steps in this task given to the signed-in person or their whole team.
+const stepsChip = (t, user) => {
+  const n = stepsForUser(t, user).length;
+  return n ? h('span', { class: 'chip chip-step steps-for-me', title: 'Steps in this task are waiting for you or your team' }, `${n} step${n === 1 ? '' : 's'} for you`) : null;
+};
+
 const checklistProgress = (t) => {
   const items = t.checklist || [];
   return items.length ? `${items.filter((i) => i.done).length}/${items.length}` : '';
@@ -51,7 +58,7 @@ const SORTS = {
 // Filter choices are remembered while you move between screens.
 const freshMemory = () => ({
   my: { search: '', status: '', priority: '', project: '', sort: 'due', view: 'list', finished: false },
-  team: { search: '', status: '', priority: '', project: '', owner: '', sort: 'due', view: 'list', finished: false, teamId: null }
+  team: { search: '', status: '', priority: '', project: '', owner: '', sort: 'due', view: 'list', finished: false, teamId: null, stepsForMe: false }
 });
 let memory = freshMemory();
 let memoryUser = null;
@@ -107,6 +114,7 @@ function renderBrowser(container, mode) {
     if (f.finished) await loadFinishedTasks();
     paint();
   } });
+  const stepsBox = isTeam ? h('input', { type: 'checkbox', checked: f.stepsForMe, onchange: () => { f.stepsForMe = stepsBox.checked; paint(); } }) : null;
   const refreshBtn = h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => load(true) }, 'Refresh');
   const newBtn = h('button', { type: 'button', class: 'btn btn-primary', onclick: () => openTaskPanel({
     defaults: { teamId: isTeam ? f.teamId : undefined, ownerId: isTeam && f.owner ? f.owner : undefined },
@@ -118,6 +126,7 @@ function renderBrowser(container, mode) {
   const toolbar2 = h('div', { class: 'toolbar toolbar-2' },
     viewToggle,
     h('label', { class: 'check' }, finishedBox, ' Show finished (last 30 days)'),
+    isTeam ? h('label', { class: 'check', title: 'Only tasks with a checklist step given to you or your team' }, stepsBox, ' Steps for me') : null,
     h('div', { class: 'spacer' }), refreshBtn, newBtn);
   const summary = h('div', { class: 'summary muted' });
   const content = h('div', { class: 'browser-content' });
@@ -208,6 +217,7 @@ function renderBrowser(container, mode) {
       if (isTeam) {
         if (f.teamId ? t.teamId !== f.teamId : !perm.canViewTask(user, t)) return false;
         if (f.owner && t.ownerId !== f.owner) return false;
+        if (f.stepsForMe && !stepsForUser(t, user).length) return false;
       } else if (t.ownerId !== user.id) return false;
       const open = OPEN_CATEGORIES.includes(t.statusCategory);
       const recentlyDone = t.statusCategory === 'done' && f.finished && (t.completedDate || '') >= fromISO;
@@ -269,7 +279,7 @@ function renderBrowser(container, mode) {
         tabindex: 0, onclick: open, onkeydown: (e) => { if (e.key === 'Enter' && e.target.tagName === 'TR') open(); }
       },
         h('td', { class: 'cell-title' },
-          h('div', { class: 'title' }, t.title),
+          h('div', { class: 'title' }, t.title, stepsChip(t, user)),
           h('div', { class: 'sub muted' },
             [projectName(t.projectId), checklistProgress(t) && `☑ ${checklistProgress(t)}`, t.statusNote && `“${t.statusNote}”`]
               .filter(Boolean).join(' · '))),
@@ -323,7 +333,7 @@ function renderBrowser(container, mode) {
       onclick: () => openTaskPanel({ task: t, onSaved: () => paint() }),
       onkeydown: (e) => { if (e.key === 'Enter') openTaskPanel({ task: t, onSaved: () => paint() }); }
     },
-      h('div', { class: 'card-title' }, t.title),
+      h('div', { class: 'card-title' }, t.title, stepsChip(t, user)),
       h('div', { class: 'card-meta' }, priorityChip(t.priority), dueLabel(t)),
       h('div', { class: 'card-foot' },
         avatar(userName(t.ownerId), 22), h('span', { class: 'muted' }, userName(t.ownerId).split(' ')[0]),

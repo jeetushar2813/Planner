@@ -11,6 +11,10 @@ export const ROLE_LABEL = {
   member: 'Team Member'
 };
 
+// "Superuser" is not a role: it is a switch on a person's account (users/{id}.superuser) that gives
+// them everything a Director can do while they keep their own role (for example Team Leader).
+export const roleLabel = (u) => `${ROLE_LABEL[u?.role] || u?.role || ''}${u?.superuser ? ' · Superuser' : ''}`;
+
 // Higher number = more authority.
 export const ROLE_LEVEL = { director: 5, manager: 4, leader: 3, asst_leader: 2, member: 1 };
 

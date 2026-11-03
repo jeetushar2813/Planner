@@ -3,7 +3,7 @@
 // everyone else sees only their own activity. The Security Rules enforce this.
 
 import { h, add, clear, fmtDateTime, fmtAgo, todayISO, addDays, toDate } from '../core/util.js';
-import { ACTION_LABEL, ROLE_LABEL } from '../core/model.js';
+import { ACTION_LABEL, ROLE_LABEL, roleLabel } from '../core/model.js';
 import * as perm from '../core/perm.js';
 import { state, myTeams, loadLog, loadRefData } from '../core/store.js';
 import { fieldLabel } from '../core/log.js';
@@ -68,7 +68,7 @@ export function renderActivity(container) {
     usageBox.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tasks compact' },
       h('thead', null, h('tr', null, h('th', null, 'Person'), h('th', null, 'Role'), h('th', null, 'Last sign-in'), h('th', null, 'Usage'))),
       h('tbody', null, sorted.map((u) => h('tr', null,
-        h('td', null, u.name), h('td', null, ROLE_LABEL[u.role]),
+        h('td', null, u.name), h('td', null, roleLabel(u)),
         h('td', null, u.lastLoginAt ? fmtAgo(u.lastLoginAt) : '–'),
         h('td', null, h('span', { class: 'chip usage-' + level(u).cls }, level(u).text))))))));
   }

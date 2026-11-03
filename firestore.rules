@@ -8,6 +8,8 @@ rules_version = '2';
 // enforced here.
 //
 // Roles (stored in users/{uid}.role): director, manager, leader, asst_leader, member
+// Superuser (users/{uid}.superuser == true): every power of the Director, whatever the role.
+// Only a Director or another Superuser can switch it on or off.
 // Scope: a person's teams are stored in users/{uid}.teamIds. Everyone except the
 // Director only sees and changes work for teams listed there.
 //
@@ -32,8 +34,11 @@ service cloud.firestore {
     }
     function role() { return me().role; }
 
-    function isDirector()   { return active() && role() == 'director'; }
-    function isLeaderUp()   { return active() && role() in ['director', 'manager', 'leader']; }
+    // A Superuser keeps their own role (for example Team Leader) but has Director powers.
+    // The field is optional, so older accounts without it are read with a default.
+    function isSuperuser()  { return active() && me().get('superuser', false) == true; }
+    function isDirector()   { return active() && (role() == 'director' || me().get('superuser', false) == true); }
+    function isLeaderUp()   { return active() && (role() in ['director', 'manager', 'leader'] || me().get('superuser', false) == true); }
     function inTeam(teamId) { return active() && teamId in me().teamIds; }
     function inScope(teamId) { return isDirector() || inTeam(teamId); }
 
@@ -90,6 +95,9 @@ service cloud.firestore {
           && (d.dueDate == null || (d.dueDate is string && d.dueDate.size() == 10))
           && (d.estimateHours == null || (d.estimateHours is number && d.estimateHours >= 0))
           && d.checklist is list && d.checklist.size() <= 60
+          // Who may tick the steps. Kept by the web page from the steps themselves.
+          && (!('checklistAssignees' in d) || (d.checklistAssignees is list && d.checklistAssignees.size() <= 60))
+          && (!('checklistForTeam' in d) || d.checklistForTeam is bool)
           && d.archived is bool
           && d.submits is number && d.reworks is number;
       }
@@ -131,6 +139,20 @@ service cloud.firestore {
               || (a.statusCategory == 'done' && gateOff(b.teamId)));
       }
 
+      // A person a checklist step was given to (or, for a step given to the whole team, anyone
+      // in the task's team) may tick steps on that task and nothing else. The rules cannot read
+      // inside the list, so the page keeps two summary fields up to date: checklistAssignees
+      // (people) and checklistForTeam (true when any step belongs to the whole team). A helper
+      // cannot change those two fields, only the steps themselves.
+      function checklistHelperMayUpdate(b, a) {
+        return inTeam(b.teamId)
+          && a.teamId == b.teamId
+          && !(b.statusCategory in ['done', 'closed'])
+          && changedKeys().hasOnly(['checklist', 'updatedAt', 'lastLogId'])
+          && (b.get('checklistForTeam', false) == true
+              || request.auth.uid in b.get('checklistAssignees', []));
+      }
+
       function canUpdate(b, a) {
         return isDirector()
           // Manager and Team Leader: everything inside their own team(s).
@@ -147,7 +169,9 @@ service cloud.firestore {
           // Project owner (any role): may hand a task of their project to someone else,
           // and may approve or send back work that is waiting in Review. Nothing else:
           // titles, dates, priority, checklist, archiving and the project itself stay as they are.
-          || projectOwnerMayUpdate(b, a);
+          || projectOwnerMayUpdate(b, a)
+          // Someone a checklist step was given to: only the steps.
+          || checklistHelperMayUpdate(b, a);
       }
 
       function projectOwnerMayUpdate(b, a) {
@@ -250,6 +274,7 @@ service cloud.firestore {
           && d.email is string && d.email.size() <= 200
           && d.role in ['director', 'manager', 'leader', 'asst_leader', 'member']
           && d.teamIds is list && d.teamIds.size() <= 20
+          && (!('superuser' in d) || d.superuser is bool)
           && d.active is bool;
       }
 
@@ -272,10 +297,14 @@ service cloud.firestore {
           && validUser(request.resource.data)
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.lastLogId != resource.data.lastLogId
-          // The Director cannot lock themselves out by changing their own role or status.
+          // Nobody can lock themselves out: on their own account they may not deactivate it, and
+          // must still be a Director or a Superuser afterwards. (This is what lets a Director
+          // make themselves a Superuser and then change their role to Team Leader, but stops
+          // a Superuser from removing their own powers by mistake. Another Director can.)
           && (userId != request.auth.uid
-              || (request.resource.data.role == resource.data.role
-                  && request.resource.data.active == resource.data.active))
+              || (request.resource.data.active == resource.data.active
+                  && (request.resource.data.role == 'director'
+                      || request.resource.data.get('superuser', false) == true)))
           && logged('user', userId, request.resource.data.lastLogId))
         ||
         // Everyone else may only record their own sign-in.

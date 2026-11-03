@@ -117,6 +117,32 @@ Each new version changes some files. To update:
 
 ### This version (Calendar, Leave, Team overview, Reports, Project owners, My profile and themes)
 
+- **Superuser, assigning to several people, and checklist steps: the rules changed, so publish `firestore.rules` again**
+  (Firestore > Rules > paste > Publish) **before** you use any of this. Until you do, saving a Superuser or a step given to
+  someone is refused with "Missing or insufficient permissions". No new index is needed.
+- **Make yourself a Superuser Team Leader (one time):**
+  1. Sign in as the Director you use now and open **People**.
+  2. Press **Edit** on your own name.
+  3. Tick **Superuser access**, change **Role** to **Team Leader**, and tick **your team** under Teams.
+  4. Press **Save changes**. Your menu refreshes and still shows People, Teams & projects, Statuses and Reports.
+  The order matters: if you change the role first and do not tick Superuser, the save is refused, because that would take
+  away your own admin powers. Nobody can switch off their own Superuser access while their role is not Director; ask another
+  Director or Superuser. Other Team Leaders stay ordinary Team Leaders: only a Director or a Superuser sees the Superuser
+  tick-box, and the database refuses anyone else.
+- **Give a task to several people:** on **New task**, an Assistant Team Leader or above (and the owner of the chosen project)
+  sees an **Assign to** list. Tick everyone who should get it. One separate task is created for each person, so each can move
+  their own copy through the statuses. The button shows how many it will create (for example "Create 3 tasks"). You are ticked
+  by default; untick yourself if you are only giving the work out. Very long lists are written in groups of five.
+  Choosing who owns a *project* is unchanged (Team Leader and above, on **Teams & projects**).
+- **Give checklist steps to people:** in a task, each step has a drop-down: **Anyone**, **Whole team (any one of them)**, or one
+  person of the task's team. A person who was given a step (or, for a team step, anyone in the task's team) can open the task,
+  tick that step and press **Save**: the app records who did it and when. They cannot change anything else on the task.
+  Team tasks shows "N steps for you" next to such tasks, and there is a **Steps for me** filter.
+  Limit worth knowing: the database cannot look inside a checklist, so someone allowed to tick steps could in principle also
+  tick or un-tick the other steps of that task (never anything else). The page only offers them their own.
+- Recommended: run `npm run test:rules` on your Mac. It now also checks Superuser and the step rules. (I could not run the rules
+  tests in my own environment, so please run them once after publishing and tell me if anything fails.)
+
 - **My profile:** publish `firestore.rules` (the same publish as for project owners). The new part lets each person save their
   own colour theme on their account. Until the rules are published the theme still works on that device, and the page says
   it could not be saved to the account. Changing a password needs no rules change.

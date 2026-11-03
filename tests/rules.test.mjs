@@ -39,7 +39,11 @@ const USERS = {
   memB:  { role: 'member',      teamIds: ['teamB'] },
   memC:  { role: 'member',      teamIds: ['teamC'] },
   ldrB:  { role: 'leader',      teamIds: ['teamB'] },
-  gone:  { role: 'member',      teamIds: ['teamA'], active: false }
+  gone:  { role: 'member',      teamIds: ['teamA'], active: false },
+  // A Superuser keeps a normal role but has every power of the Director.
+  su:     { role: 'leader', teamIds: ['teamA'], superuser: true },
+  suGone: { role: 'leader', teamIds: ['teamA'], superuser: true, active: false },
+  notSu:  { role: 'leader', teamIds: ['teamA'], superuser: false }
 };
 
 const STATUSES = {
@@ -619,5 +623,171 @@ describe('project owners', () => {
     await assertSucceeds(logged('ldrA', { path: 'projects/pOld', kind: 'update', type: 'project', entityId: 'pOld', teamId: 'teamA', data: { ownerId: 'memA2' } }));
     await assertFails(logged('memA1', { path: 'projects/pOwned', kind: 'update', type: 'project', entityId: 'pOwned', teamId: 'teamA', data: { ownerId: 'memA1' } }));
     await assertFails(logged('memA1', { path: 'projects/pOwned', kind: 'update', type: 'project', entityId: 'pOwned', teamId: 'teamA', data: { name: 'Mine now' } }));
+  });
+});
+
+
+// ------------------------------------------------------------- superuser
+
+describe('superuser', () => {
+  const upd = (uid, target, data) => logged(uid, { path: `users/${target}`, kind: 'update', type: 'user', entityId: target, teamId: null, data });
+  const newUser = (over = {}) => ({
+    name: 'New', email: 'new@x.test', role: 'member', teamIds: ['teamA'], active: true,
+    createdAt: serverTimestamp(), lastLoginAt: null, ...over
+  });
+
+  test('a Superuser reads every team\'s tasks although their role is Team Leader', async () => {
+    await assertSucceeds(getDoc(doc(as('su'), 'tasks', 'tB1')));
+    await assertSucceeds(getDoc(doc(as('su'), 'tasks', 'tC1')));
+    await assertFails(getDoc(doc(as('ldrA'), 'tasks', 'tB1')));      // an ordinary Team Leader still cannot
+    await assertFails(getDoc(doc(as('notSu'), 'tasks', 'tB1')));     // superuser: false means nothing
+  });
+  test('a Superuser changes work in any team; an ordinary leader only their own', async () => {
+    await assertSucceeds(updateTask('su', 'tB1', { title: 'Changed' }, 'teamB'));
+    await assertSucceeds(updateTask('su', 'tA1', { dueDate: '2027-01-01' }));
+    await assertFails(updateTask('ldrA', 'tB1', { title: 'Changed' }, 'teamB'));
+    await assertFails(updateTask('notSu', 'tB1', { title: 'Changed' }, 'teamB'));
+  });
+  test('a Superuser creates tasks in any team', async () => {
+    await assertSucceeds(createTask('su', 'suNew', { ownerId: 'memB', teamId: 'teamB' }));
+    await assertFails(createTask('ldrA', 'ldrNew', { ownerId: 'memB', teamId: 'teamB' }));
+  });
+  test('a Superuser runs people, teams, statuses and holidays like the Director', async () => {
+    await assertSucceeds(logged('su', { path: 'users/u1', kind: 'create', type: 'user', entityId: 'u1', teamId: null, data: newUser() }));
+    await assertSucceeds(upd('su', 'memA1', { role: 'asst_leader' }));
+    await assertSucceeds(logged('su', { path: 'teams/teamB', kind: 'update', type: 'team', entityId: 'teamB', teamId: 'teamB', data: { name: 'B2' } }));
+    await assertFails(logged('ldrA', { path: 'teams/teamB', kind: 'update', type: 'team', entityId: 'teamB', teamId: 'teamB', data: { name: 'B3' } }));
+  });
+  test('a Superuser reads the whole activity log', async () => {
+    await assertSucceeds(getDoc(doc(as('su'), 'activityLog', 'oldB')));
+    await assertFails(getDoc(doc(as('ldrA'), 'activityLog', 'oldB')));
+  });
+
+  test('only a Director or Superuser can switch Superuser on for someone', async () => {
+    await assertSucceeds(upd('dir', 'memA2', { superuser: true }));
+    await assertSucceeds(upd('su', 'memA1', { superuser: true }));
+    await assertFails(upd('ldrA', 'memA1', { superuser: true }));
+    await assertFails(upd('mgrA', 'memA1', { superuser: true }));
+    await assertFails(upd('notSu', 'memA1', { superuser: true }));
+  });
+  test('nobody makes themselves a Superuser', async () => {
+    await assertFails(upd('ldrA', 'ldrA', { superuser: true }));
+    await assertFails(upd('memA1', 'memA1', { superuser: true }));
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { superuser: true }));   // not even without a log entry
+  });
+  test('a person who is made a Superuser gets the powers straight away', async () => {
+    await assertFails(getDoc(doc(as('memA2'), 'tasks', 'tB1')));
+    await assertSucceeds(upd('dir', 'memA2', { superuser: true }));
+    await assertSucceeds(getDoc(doc(as('memA2'), 'tasks', 'tB1')));
+    await assertSucceeds(upd('dir', 'memA2', { superuser: false }));
+    await assertFails(getDoc(doc(as('memA2'), 'tasks', 'tB1')));
+  });
+  test('Superuser must be true or false', async () => {
+    await assertFails(upd('dir', 'memA2', { superuser: 'yes' }));
+    await assertFails(upd('dir', 'memA2', { superuser: 1 }));
+  });
+
+  test('the first Director can become a Superuser and change their own role in one save', async () => {
+    await assertSucceeds(upd('dir', 'dir', { superuser: true, role: 'leader', teamIds: ['teamA'] }));
+  });
+  test('but a Director cannot just drop their role: that would remove their own powers', async () => {
+    await assertFails(upd('dir', 'dir', { role: 'leader', teamIds: ['teamA'] }));
+    await assertFails(upd('dir', 'dir', { role: 'leader', superuser: false }));
+    await assertFails(upd('dir', 'dir', { role: 'member' }));
+  });
+  test('a Superuser cannot switch off their own Superuser access or deactivate themselves', async () => {
+    await assertFails(upd('su', 'su', { superuser: false }));
+    await assertFails(upd('su', 'su', { active: false }));
+    await assertSucceeds(upd('su', 'su', { teamIds: ['teamA', 'teamB'] }));         // other self edits are fine
+  });
+  test('another Superuser or Director can switch it off', async () => {
+    await assertSucceeds(upd('dir', 'su', { superuser: false }));
+    await assertFails(getDoc(doc(as('su'), 'tasks', 'tB1')));
+  });
+  test('a deactivated Superuser has no powers at all', async () => {
+    await assertFails(getDoc(doc(as('suGone'), 'tasks', 'tA1')));
+    await assertFails(upd('suGone', 'memA1', { role: 'leader' }));
+  });
+});
+
+// ------------------------------------------------------ checklist helpers
+
+describe('checklist steps given to people', () => {
+  const step = (over = {}) => ({ id: 's1', text: 'Step', done: false, ...over });
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      // memA1 was given step 1; step 2 belongs to the whole team. memA2 owns the task.
+      await setDoc(doc(db, 'tasks', 'tStep'), taskDoc({
+        ownerId: 'memA2', checklist: [step({ assigneeId: 'memA1' }), step({ id: 's2', forTeam: true }), step({ id: 's3' })],
+        checklistAssignees: ['memA1'], checklistForTeam: true
+      }));
+      await setDoc(doc(db, 'tasks', 'tOnlyPerson'), taskDoc({
+        ownerId: 'memA2', checklist: [step({ assigneeId: 'memA1' })], checklistAssignees: ['memA1'], checklistForTeam: false
+      }));
+      await setDoc(doc(db, 'tasks', 'tLeaderOwns'), taskDoc({
+        ownerId: 'ldrA', checklist: [step({ assigneeId: 'memA1' })], checklistAssignees: ['memA1'], checklistForTeam: false
+      }));
+      await setDoc(doc(db, 'tasks', 'tStepDone'), taskDoc({
+        ownerId: 'memA2', status: 'done', statusCategory: 'done', completedAt: new Date(), completedDate: '2026-11-01',
+        checklist: [step({ assigneeId: 'memA1', done: true })], checklistAssignees: ['memA1'], checklistForTeam: false
+      }));
+    });
+  });
+  const tick = (uid, taskId, extra = {}) => updateTask(uid, taskId, {
+    checklist: [step({ assigneeId: 'memA1', done: true, doneBy: uid }), step({ id: 's2', forTeam: true }), step({ id: 's3' })], ...extra
+  });
+
+  test('the person a step was given to can tick it on someone else\'s task', async () => {
+    await assertSucceeds(tick('memA1', 'tStep'));
+    await assertSucceeds(updateTask('memA1', 'tOnlyPerson', { checklist: [step({ assigneeId: 'memA1', done: true, doneBy: 'memA1' })] }));
+  });
+  test('a step given to the whole team can be ticked by anyone in that team', async () => {
+    await assertSucceeds(updateTask('asstA', 'tStep', { checklist: [step({ assigneeId: 'memA1' }), step({ id: 's2', forTeam: true, done: true, doneBy: 'asstA' })] }));
+    await assertSucceeds(updateTask('memA1', 'tStep', { checklist: [step({ assigneeId: 'memA1' }), step({ id: 's2', forTeam: true, done: true, doneBy: 'memA1' })] }));
+  });
+  test('someone in another team cannot', async () => {
+    await assertFails(updateTask('memB', 'tStep', { checklist: [step({ done: true })] }));
+    await assertFails(updateTask('memC', 'tOnlyPerson', { checklist: [step({ done: true })] }));
+  });
+  test('a team member who was not given a step cannot tick when no step is for the team', async () => {
+    await assertFails(updateTask('memA1', 'tA2', { checklist: [step({ done: true })] }));        // old task: no helper fields
+    await assertFails(updateTask('memA2', 'tLeaderOwns', { checklist: [step({ assigneeId: 'memA1', done: true })] }));
+  });
+  test('a helper can change the checklist and nothing else', async () => {
+    await assertFails(tick('memA1', 'tStep', { title: 'Renamed' }));
+    await assertFails(tick('memA1', 'tStep', { status: 'inprogress', statusCategory: 'active' }));
+    await assertFails(tick('memA1', 'tStep', { dueDate: '2027-02-02' }));
+    await assertFails(tick('memA1', 'tStep', { ownerId: 'memA1' }));
+    await assertFails(tick('memA1', 'tStep', { archived: true }));
+  });
+  test('a helper cannot give themselves or others more steps', async () => {
+    await assertFails(updateTask('memA1', 'tStep', { checklistAssignees: ['memA1', 'memA2'] }));
+    await assertFails(updateTask('memA1', 'tStep', { checklistForTeam: false }));
+    await assertFails(updateTask('memA1', 'tA2', { checklistAssignees: ['memA1'], checklistForTeam: false }));
+    await assertFails(updateTask('memA1', 'tA2', { checklistAssignees: ['memA1'], checklist: [step({ assigneeId: 'memA1', done: true })] }));
+  });
+  test('nothing can be ticked once the task is finished', async () => {
+    await assertFails(updateTask('memA1', 'tStepDone', { checklist: [step({ assigneeId: 'memA1', done: false })] }));
+  });
+  test('the checklist still has a limit of 60 steps', async () => {
+    await assertFails(updateTask('memA1', 'tOnlyPerson', { checklist: Array.from({ length: 61 }, (_, i) => step({ id: 'x' + i, assigneeId: 'memA1' })) }));
+  });
+  test('the owner and a leader can still edit the checklist and who it is given to', async () => {
+    await assertSucceeds(updateTask('memA2', 'tStep', { checklist: [step({ assigneeId: 'memA1', done: true }), step({ id: 's2', forTeam: true }), step({ id: 's3' })] }));
+    await assertSucceeds(updateTask('ldrA', 'tStep', { checklist: [step({ assigneeId: 'memA2' })], checklistAssignees: ['memA2'], checklistForTeam: false }));
+  });
+  test('a new task may carry the two summary fields, with the right types', async () => {
+    await assertSucceeds(createTask('ldrA', 'withSteps', { checklist: [step({ assigneeId: 'memA1' })], checklistAssignees: ['memA1'], checklistForTeam: false }));
+    await assertFails(createTask('ldrA', 'badSteps1', { checklistForTeam: 'yes' }));
+    await assertFails(createTask('ldrA', 'badSteps2', { checklistAssignees: 'memA1' }));
+  });
+  test('an Assistant Team Leader can give a task to several people in their team, one task each', async () => {
+    await assertSucceeds(createTask('asstA', 'copy1', { ownerId: 'memA1' }));
+    await assertSucceeds(createTask('asstA', 'copy2', { ownerId: 'memA2' }));
+    await assertFails(createTask('asstA', 'copy3', { ownerId: 'memB', teamId: 'teamB' }));
+  });
+  test('a plain member cannot give a task to someone else', async () => {
+    await assertFails(createTask('memA1', 'memCopy', { ownerId: 'memA2' }));
   });
 });

@@ -2,7 +2,7 @@
 // page shell (sidebar, header) and switches between screens by the address hash.
 
 import { h, clear, $, fmtAgo } from './core/util.js';
-import { ROLE_LABEL } from './core/model.js';
+import { roleLabel } from './core/model.js';
 import { appSettings } from './config.js';
 import * as perm from './core/perm.js';
 import {
@@ -104,6 +104,7 @@ function showLogin(message = '') {
 
 // -------------------------------------------------------------------- shell
 
+let shellRefListener = null;
 function showShell() {
   const user = state.user;
   navLinks = [];
@@ -123,12 +124,22 @@ function showShell() {
     freshness.textContent = state.ref.loadedAt ? `People and teams updated ${fmtAgo(state.ref.loadedAt)}.` : '';
   };
   drawFreshness();
-  bus.addEventListener('ref', drawFreshness);
+  // If this person's own role, Superuser switch or owned projects change (for example a
+  // Director edits themselves), rebuild the menu so it shows what they can now do.
+  const sig = (u) => [u?.role, u?.superuser === true, (u?.ownedProjectIds || []).join(',')].join('|');
+  const built = sig(user);
+  const onRef = () => {
+    drawFreshness();
+    if (state.user && sig(state.user) !== built) { bus.removeEventListener('ref', onRef); showShell(); }
+  };
+  bus.addEventListener('ref', onRef);
+  if (shellRefListener) bus.removeEventListener('ref', shellRefListener);
+  shellRefListener = onRef;
 
   const demoSwitch = isDemo() ? h('label', { class: 'demo-switch' }, 'Viewing as ',
     (() => {
       const sel = h('select', { 'aria-label': 'Switch demo person', onchange: () => switchDemoUser(sel.value) },
-        state.ref.users.map((u) => h('option', { value: u.email, selected: u.id === user.id }, `${u.name} (${ROLE_LABEL[u.role]})`)));
+        state.ref.users.map((u) => h('option', { value: u.email, selected: u.id === user.id }, `${u.name} (${roleLabel(u)})`)));
       return sel;
     })()) : null;
 
@@ -138,7 +149,7 @@ function showShell() {
     nav,
     h('div', { class: 'sidebar-foot' },
       h('a', { class: 'who', href: '#/profile', title: 'My profile', onclick: () => document.body.classList.remove('nav-open') }, avatar(user.name, 34),
-        h('div', null, h('strong', null, user.name), h('div', { class: 'muted small' }, ROLE_LABEL[user.role]))),
+        h('div', null, h('strong', null, user.name), h('div', { class: 'muted small' }, roleLabel(user)))),
       freshness,
       h('div', { class: 'foot-actions' },
         h('button', { type: 'button', class: 'link-btn', onclick: async () => {

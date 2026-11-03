@@ -10,7 +10,7 @@ const FIELD_LABEL = {
   ownerId: 'Owner', status: 'Status', statusNote: 'Status note', priority: 'Priority',
   startDate: 'Start date', dueDate: 'Due date', estimateHours: 'Estimate (hours)',
   checklist: 'Checklist', archived: 'Archived', name: 'Name', role: 'Role',
-  teamIds: 'Teams', active: 'Active', approvalGate: 'Approval gate',
+  teamIds: 'Teams', active: 'Active', superuser: 'Superuser access', checklistAssignees: 'Step helpers', approvalGate: 'Approval gate',
   category: 'Category', color: 'Colour', order: 'Order', needsReason: 'Needs reason',
   email: 'Email', text: 'Comment',
   type: 'Type', endDate: 'To', half: 'Day part', reason: 'Reason', decisionNote: 'Decision note',

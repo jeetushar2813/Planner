@@ -7,7 +7,7 @@
 // on screen without reading again.
 
 import { h, add, clear, todayISO, fmtDate, fmtDateLong, daysBetween, toDate } from '../core/util.js';
-import { LEAVE_TYPE_LABEL, ROLE_LABEL } from '../core/model.js';
+import { LEAVE_TYPE_LABEL, roleLabel } from '../core/model.js';
 import { PERIOD_KINDS, resolvePeriod, compileReport, compare } from '../core/report.js';
 import { reportSheets, reportFileName } from '../core/reportExport.js';
 import { buildXlsx, XLSX_MIME } from '../core/xlsx.js';
@@ -42,13 +42,13 @@ export function renderReports(container) {
   // get reports for the projects they own. The Director can report on any project.
   const teamReports = perm.canSeeTeamReports(user);
   const teams = teamReports ? myTeams() : [];
-  const projectChoices = () => (user.role === 'director'
+  const projectChoices = () => (perm.isDirector(user)
     ? state.ref.projects.filter((p) => p.active !== false) : ownedProjects());
   if (presetProject !== null) { f.projectId = presetProject; f.teamId = ''; f.personId = ''; presetProject = null; }
   if (f.projectId && !projectChoices().some((p) => p.id === f.projectId)) f.projectId = '';
   if (!teamReports && !f.projectId) f.projectId = projectChoices()[0]?.id || '';
   if (f.teamId && !teams.some((t) => t.id === f.teamId)) f.teamId = '';
-  const isDirector = user.role === 'director';
+  const isDirector = perm.isDirector(user);
 
   let data = null, loading = true, failure = null;
   let model = null;
@@ -213,7 +213,7 @@ export function renderReports(container) {
         h('h2', null, period.name, ' · ', scopeText),
         h('p', { class: 'muted' }, period.label,
           period.inProgress ? ` · still running, figures are up to ${fmtDate(period.asOf)}` : ''),
-        h('p', { class: 'muted small' }, `Prepared ${fmtDateLong(today)} by ${user.name} (${ROLE_LABEL[user.role]})`)),
+        h('p', { class: 'muted small' }, `Prepared ${fmtDateLong(today)} by ${user.name} (${roleLabel(user)})`)),
       tiles(hd),
       section('Progress over the period', progressBlock()),
       section(f.personId ? 'Scorecard' : 'Individual scorecards', scorecards()),

@@ -13,6 +13,8 @@ Start with **SETUP.md**.
 ## What it does today
 
 - Five roles: Director, Manager, Team Leader, Assistant Team Leader, Team Member, each with a login.
+- Superuser: a switch on a person's account that gives every Director power while their role stays (for example Team Leader). Only a Director or Superuser can switch it on.
+- A task can be given to several people at once (one task each), and each checklist step can be given to one person or to the whole team.
 - Tasks with owner, team, project, priority, start and due dates, checklist, comments and a status note.
 - Customisable statuses grouped into categories (to do, active, review, paused, done, closed). Overdue is worked out automatically.
 - My tasks (live), Team tasks (list and board with drag-and-drop), filters and search.

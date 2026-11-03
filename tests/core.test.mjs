@@ -377,3 +377,113 @@ describe('colour themes and passwords', () => {
     assert.equal(validateNewPassword('old', 'Abcdefg1', 'Abcdefg1'), null);
   });
 });
+
+// ------------------------------------------------------------ superuser and steps
+
+import { deriveStepFields, cleanSteps, dropOutsiders, stepsForUser, hasSteps } from '../js/core/steps.js';
+import { roleLabel } from '../js/core/model.js';
+
+describe('superuser', () => {
+  const su = { id: 'su', role: 'leader', teamIds: ['t1'], superuser: true };
+  const leader = { id: 'l', role: 'leader', teamIds: ['t1'] };
+  const falseSu = { id: 'f', role: 'leader', teamIds: ['t1'], superuser: false };
+  const taskB = { id: 'x', teamId: 't2', ownerId: 'someone', createdBy: 'z', status: 'pending', statusCategory: 'todo' };
+
+  test('a Superuser has Director powers, whatever the role', () => {
+    assert.equal(perm.isDirector(su), true);
+    assert.equal(perm.isLeaderUp(su), true);
+    assert.equal(perm.canManageUsers(su), true);
+    assert.equal(perm.canViewTask(su, taskB), true);
+    assert.equal(perm.canEditDetails(su, taskB), true);
+    assert.equal(perm.canChangeDeadline(su, taskB), true);
+    assert.equal(perm.canArchive(su, taskB), true);
+    assert.equal(perm.visibleTeams(su, [{ id: 't1' }, { id: 't2' }]).length, 2);
+  });
+  test('an ordinary Team Leader is unchanged', () => {
+    for (const u of [leader, falseSu]) {
+      assert.equal(perm.isDirector(u), false);
+      assert.equal(perm.canManageUsers(u), false);
+      assert.equal(perm.canViewTask(u, taskB), false);
+      assert.equal(perm.canEditDetails(u, taskB), false);
+      assert.equal(perm.visibleTeams(u, [{ id: 't1' }, { id: 't2' }]).length, 1);
+    }
+  });
+  test('only a real flag counts', () => {
+    assert.equal(perm.isSuperuser({ role: 'member', superuser: 'true' }), false);
+    assert.equal(perm.isSuperuser({ role: 'member', superuser: 1 }), false);
+    assert.equal(perm.isDirector({ role: 'member', superuser: true }), true);
+    assert.equal(perm.isMember({ role: 'member', superuser: true }), false);
+  });
+  test('the role label tells you', () => {
+    assert.equal(roleLabel(su), 'Team Leader · Superuser');
+    assert.equal(roleLabel(leader), 'Team Leader');
+    assert.equal(roleLabel({ role: 'director' }), 'Director');
+  });
+});
+
+describe('checklist steps given to people', () => {
+  const steps = [
+    { id: '1', text: 'a', done: false, assigneeId: 'u1' },
+    { id: '2', text: 'b', done: false, forTeam: true },
+    { id: '3', text: 'c', done: true, assigneeId: 'u1', doneBy: 'u1', doneAt: '2026-11-03T01:00:00Z' },
+    { id: '4', text: 'd', done: false }
+  ];
+  const task = { id: 't', teamId: 't1', ownerId: 'o', statusCategory: 'active', checklist: steps };
+
+  test('summary fields for the rules', () => {
+    assert.deepEqual(deriveStepFields(steps), { checklistAssignees: ['u1'], checklistForTeam: true });
+    assert.deepEqual(deriveStepFields([{ id: '1', text: 'x', done: false }]), { checklistAssignees: [], checklistForTeam: false });
+    assert.deepEqual(deriveStepFields(undefined), { checklistAssignees: [], checklistForTeam: false });
+  });
+  test('cleanSteps keeps only valid keys and never leaves undefined', () => {
+    const out = cleanSteps([
+      { id: '1', text: 'x'.repeat(300), done: false, assigneeId: '', forTeam: false, doneBy: 'zz', extra: 1 },
+      { id: '2', text: 'y', done: true, forTeam: true, assigneeId: 'u9', doneBy: 'u9', doneAt: 't' }
+    ]);
+    assert.equal(out[0].text.length, 200);
+    assert.deepEqual(Object.keys(out[0]), ['id', 'text', 'done']);
+    assert.deepEqual(out[1], { id: '2', text: 'y', done: true, assigneeId: 'u9', doneBy: 'u9', doneAt: 't' }); // a person wins over "team"
+    assert.ok(!JSON.stringify(out).includes('undefined'));
+  });
+  test('key order never counts as a change', () => {
+    const stored = [{ done: false, id: '1', text: 'a', assigneeId: 'u1' }];
+    assert.equal(JSON.stringify(cleanSteps(stored)), JSON.stringify(cleanSteps(cleanSteps(stored))));
+  });
+  test('moving a task to another team drops helpers who are not in it', () => {
+    const teams = { u1: ['t1'], u2: ['t2'] };
+    const r = dropOutsiders([{ id: '1', text: 'a', done: false, assigneeId: 'u1' }, { id: '2', text: 'b', done: false, assigneeId: 'u2' }, { id: '3', text: 'c', done: false, forTeam: true }], 't2', (id) => teams[id] || []);
+    assert.equal(r.dropped, 1);
+    assert.equal(r.steps[0].assigneeId, undefined);
+    assert.equal(r.steps[1].assigneeId, 'u2');
+    assert.equal(r.steps[2].forTeam, true);
+  });
+  test('steps still waiting for a person', () => {
+    assert.deepEqual(stepsForUser(task, { id: 'u1', teamIds: ['t1'] }).map((s) => s.id), ['1', '2']);   // 3 is done
+    assert.deepEqual(stepsForUser(task, { id: 'u2', teamIds: ['t1'] }).map((s) => s.id), ['2']);        // team step only
+    assert.deepEqual(stepsForUser(task, { id: 'u3', teamIds: ['t9'] }), []);                              // other team: nothing
+    assert.equal(hasSteps(task), true);
+    assert.equal(hasSteps({ checklist: [{ id: '1', text: 'x', done: false }] }), false);
+  });
+  test('who may tick what', () => {
+    const helper = { id: 'u1', role: 'member', teamIds: ['t1'] };
+    const mate = { id: 'u2', role: 'member', teamIds: ['t1'] };
+    const stranger = { id: 'u9', role: 'member', teamIds: ['t2'] };
+    assert.equal(perm.canTickItem(helper, task, steps[0]), true);
+    assert.equal(perm.canTickItem(helper, task, steps[3]), false);   // not given to them
+    assert.equal(perm.canTickItem(mate, task, steps[1]), true);      // whole-team step
+    assert.equal(perm.canTickItem(mate, task, steps[0]), false);
+    assert.equal(perm.canTickItem(stranger, task, steps[1]), false); // other team
+    assert.equal(perm.canTickChecklist(mate, task), true);
+    assert.equal(perm.canTickChecklist(stranger, task), false);
+    assert.equal(perm.canEditAnything(mate, task, [], null), true);  // Save appears for a helper
+    // the owner and leaders can tick any step; a finished task locks the helpers
+    assert.equal(perm.canTickItem({ id: 'o', role: 'member', teamIds: ['t1'] }, task, steps[3]), true);
+    assert.equal(perm.canTickItem({ id: 'l', role: 'leader', teamIds: ['t1'] }, task, steps[3]), true);
+    assert.equal(perm.canTickItem(helper, { ...task, statusCategory: 'done' }, steps[0]), false);
+  });
+  test('steps are given out by people who can edit details', () => {
+    assert.equal(perm.canAssignSteps({ id: 'a', role: 'asst_leader', teamIds: ['t1'] }, task), true);
+    assert.equal(perm.canAssignSteps({ id: 'u1', role: 'member', teamIds: ['t1'] }, task), false);
+    assert.equal(perm.canAssignSteps({ id: 'x', role: 'leader', teamIds: ['t2'] }, task), false);
+  });
+});

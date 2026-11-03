@@ -3,6 +3,7 @@
 
 import { h, add, clear, fmtAgo, uid20 } from '../core/util.js';
 import { ROLES, ROLE_LABEL } from '../core/model.js';
+import { keepsFullPower } from '../core/store.js';
 import {
   state, bus, teamName, createPerson, updatePerson, loadRefData, getBackend, isDemo
 } from '../core/store.js';
@@ -42,7 +43,7 @@ export function renderPeople(container) {
     if (!users.length) { content.append(emptyState('No people yet', 'Add the first person.')); return; }
     const rows = users.map((u) => h('tr', { class: u.active === false ? 'row-muted' : '' },
       h('td', null, h('strong', null, u.name), h('div', { class: 'sub muted' }, u.email)),
-      h('td', null, ROLE_LABEL[u.role] || u.role),
+      h('td', null, ROLE_LABEL[u.role] || u.role, u.superuser ? h('span', { class: 'chip chip-super', title: 'Has every power of the Director' }, 'Superuser') : null),
       h('td', null, (u.teamIds || []).map(teamName).join(', ') || h('span', { class: 'muted' }, 'None')),
       h('td', null, u.lastLoginAt ? fmtAgo(u.lastLoginAt) : h('span', { class: 'muted' }, 'Never')),
       h('td', null, u.active === false ? h('span', { class: 'chip chip-off' }, 'Deactivated') : h('span', { class: 'chip chip-on' }, 'Active')),
@@ -62,8 +63,8 @@ function openPersonPanel(person, onDone) {
   const isNew = !person;
   const isSelf = person && person.id === state.user.id;
   const draft = isNew
-    ? { name: '', email: '', role: 'member', teamIds: [], password: tempPassword(), sendReset: true }
-    : { name: person.name, email: person.email, role: person.role, teamIds: [...(person.teamIds || [])], active: person.active !== false };
+    ? { name: '', email: '', role: 'member', teamIds: [], password: tempPassword(), sendReset: true, superuser: false }
+    : { name: person.name, email: person.email, role: person.role, teamIds: [...(person.teamIds || [])], active: person.active !== false, superuser: person.superuser === true };
 
   const panel = openPanel({ title: isNew ? 'Add person' : 'Edit person', subtitle: isNew ? 'Creates a login for them.' : person.email });
   const form = h('form', { class: 'task-form', novalidate: true });
@@ -84,13 +85,25 @@ function openPersonPanel(person, onDone) {
     const nameInput = h('input', { type: 'text', value: draft.name, maxlength: 100, oninput: (e) => { draft.name = e.target.value; } });
     const emailInput = h('input', { type: 'email', value: draft.email, disabled: !isNew, oninput: (e) => { draft.email = e.target.value; } });
     const roleSelect = select(ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] })), draft.role, {
-      disabled: isSelf,
       onchange: (e) => { draft.role = e.target.value; if (draft.role === 'director') draft.teamIds = []; draw(); }
+    });
+    const losesPower = isSelf && !keepsFullPower(draft);
+    const superBox = h('input', {
+      type: 'checkbox', checked: draft.superuser,
+      // You cannot switch off your own Superuser access unless your role is Director.
+      disabled: isSelf && person.superuser === true && draft.role !== 'director',
+      onchange: (e) => { draft.superuser = e.target.checked; draw(); }
     });
     add(form,
       field('Full name', nameInput),
       field('Email (their login)', emailInput, isNew ? null : 'The email cannot be changed here.'),
-      field('Role', roleSelect, isSelf ? 'You cannot change your own role.' : ROLE_HELP[draft.role]),
+      field('Role', roleSelect, ROLE_HELP[draft.role]),
+      field('Superuser access', h('label', { class: 'check' }, superBox, ' Has every power of the Director, whatever the role'),
+        losesPower
+          ? 'Tick this first. Without it your own role change would remove your admin powers, so it is refused.'
+          : (draft.role === 'director'
+            ? 'A Director already has every power; this matters only if the role is changed later.'
+            : 'Keeps the role above (for example Team Leader) for teams and reports, and adds all Director powers. Give it to as few people as you can.')),
       field('Teams', h('div', { class: 'check-list' }, teamBoxes.length ? teamBoxes : h('p', { class: 'muted' }, 'No teams yet. Create one under Teams & projects first.')),
         draft.role === 'director' ? 'Directors see every team, so no team is needed.' : null),
       isNew ? field('Temporary password',
@@ -122,7 +135,7 @@ function openPersonPanel(person, onDone) {
     submit.disabled = true; submit.textContent = 'Saving...';
     try {
       if (isNew) {
-        if (draft.role !== 'director' && !draft.teamIds.length) {
+        if (draft.role !== 'director' && !draft.teamIds.length && !draft.superuser) {
           const ok = await confirmDialog('No team is selected, so this person will not see any tasks. Continue anyway?', { confirm: 'Continue' });
           if (!ok) { busy = false; submit.disabled = false; submit.textContent = 'Create account'; return; }
         }
@@ -137,7 +150,14 @@ function openPersonPanel(person, onDone) {
           actions: [{ label: 'Done', kind: 'primary', value: true }]
         });
       } else {
-        await updatePerson(person, { name: draft.name.trim(), role: draft.role, teamIds: draft.teamIds, active: draft.active });
+        if (isSelf && !keepsFullPower(draft)) {
+          throw new Error('That would remove your own admin powers. Tick "Superuser access" first, or ask another Director or Superuser to change your role.');
+        }
+        if (draft.role !== 'director' && !draft.teamIds.length) {
+          const ok = await confirmDialog(`${draft.name || 'This person'} is not in any team, so they will see no team tasks. Continue anyway?`, { confirm: 'Continue' });
+          if (!ok) { busy = false; submit.disabled = false; submit.textContent = 'Save changes'; return; }
+        }
+        await updatePerson(person, { name: draft.name.trim(), role: draft.role, teamIds: draft.teamIds, active: draft.active, superuser: draft.superuser });
         toast('Saved.', 'success');
         panel.close();
       }
