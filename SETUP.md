@@ -57,7 +57,7 @@ the browser console shows an error with a link that creates it in one click. Ind
 npm run test:rules
 ```
 
-This starts a local copy of Firestore and runs about 50 checks, such as "a member cannot change a due date" and
+This starts a local copy of Firestore and runs about 70 checks (including the leave and holiday rules), such as "a member cannot change a due date" and
 "a change without a log entry is refused". **All checks should pass before you add real people.**
 If any fail, please send me the output.
 
@@ -103,6 +103,34 @@ The free plan allows 50,000 reads and 20,000 writes per day. The app is built to
 tens of people: people, teams, statuses and projects are cached in the browser for 30 minutes, only **My tasks**
 listens live, and every save is one batched write (task plus its log entry). Use the Firebase console
 (**Usage**) to keep an eye on it. If you ever approach the limit, tell me and we will tighten it.
+
+## Backups
+
+## Updating the app later
+
+Each new version changes some files. To update:
+
+1. Copy the new files over your Planner folder, **but keep your own `js/config.js`** (it holds your Firebase settings).
+2. Upload the changed files to GitHub (the site refreshes in a minute or two; press Cmd+Shift+R to see it).
+3. **Publish the rules again** (`firestore.rules` into Firestore > Rules > Publish) whenever the new version says the rules changed.
+4. If a page shows an error that mentions an index, click the link in the browser console (or deploy `firestore.indexes.json`).
+
+### This version (Calendar, Leave, Team overview)
+
+- The rules changed: publish them again, otherwise Leave and Calendar will say "Your role does not allow that action".
+- One new index is used (leaves by team and end date). It is in `firestore.indexes.json`.
+- New: public holidays for Malaysia. After the new files are on GitHub, sign in as the Director, open **Leave**, press
+  **Add Malaysian holidays**, keep the years ticked and press **Add**. No rules change is needed for this.
+- Optional settings in `js/config.js`, inside `appSettings` (the app works without them):
+
+```js
+export const appSettings = {
+  appName: 'Planner',
+  organisation: 'SMM Education Group',
+  weekendDays: [0, 6],   // 0 = Sunday ... 6 = Saturday. Use [5, 6] for Friday and Saturday weekends.
+  weekStartsOn: 1        // 1 = Monday, 0 = Sunday
+};
+```
 
 ## Backups
 

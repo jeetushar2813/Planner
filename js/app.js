@@ -13,6 +13,9 @@ import { renderLogin } from './ui/login.js';
 import { renderHome } from './ui/home.js';
 import { renderMyTasks, renderTeamTasks } from './ui/tasks.js';
 import { renderActivity } from './ui/activity.js';
+import { renderCalendar } from './ui/calendar.js';
+import { renderLeave } from './ui/leave.js';
+import { renderOverview } from './ui/overview.js';
 import { renderPeople } from './ui/people.js';
 import { renderTeams } from './ui/teams.js';
 import { renderStatuses } from './ui/statuses.js';
@@ -26,6 +29,9 @@ const ROUTES = [
   { path: 'home', label: 'Home', icon: '⌂', allow: () => true, render: renderHome },
   { path: 'my', label: 'My tasks', icon: '☑', allow: () => true, render: renderMyTasks },
   { path: 'team', label: 'Team tasks', icon: '▦', allow: () => true, render: renderTeamTasks },
+  { path: 'calendar', label: 'Calendar', icon: '▤', allow: () => true, render: renderCalendar },
+  { path: 'leave', label: 'Leave', icon: '☂', allow: () => true, render: renderLeave },
+  { path: 'overview', label: 'Team overview', icon: '▥', allow: perm.canSeeOverview, render: renderOverview },
   { path: 'activity', label: 'Activity', icon: '↻', allow: () => true, render: renderActivity },
   { path: 'people', label: 'People', icon: '☺', group: 'Manage', allow: perm.canManageUsers, render: renderPeople },
   { path: 'teams', label: 'Teams & projects', icon: '◎', group: 'Manage', allow: perm.isLeaderUp, render: renderTeams },

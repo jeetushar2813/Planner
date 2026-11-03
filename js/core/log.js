@@ -12,7 +12,9 @@ const FIELD_LABEL = {
   checklist: 'Checklist', archived: 'Archived', name: 'Name', role: 'Role',
   teamIds: 'Teams', active: 'Active', approvalGate: 'Approval gate',
   category: 'Category', color: 'Colour', order: 'Order', needsReason: 'Needs reason',
-  email: 'Email', text: 'Comment'
+  email: 'Email', text: 'Comment',
+  type: 'Type', endDate: 'To', half: 'Day part', reason: 'Reason', decisionNote: 'Decision note',
+  date: 'Date', userId: 'Person'
 };
 
 export const fieldLabel = (f) => FIELD_LABEL[f] || f;

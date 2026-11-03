@@ -69,8 +69,36 @@ export function parseISO(iso) {
   return new Date(y, m - 1, d);
 }
 
+// ---- calendar helpers (all on 'YYYY-MM-DD' text)
+
+export function dow(iso) { return parseISO(iso).getDay(); }   // 0 = Sunday
+
+// First day of the week containing `iso`. weekStartsOn: 1 = Monday, 0 = Sunday.
+export function startOfWeek(iso, weekStartsOn = 1) {
+  const diff = (dow(iso) - weekStartsOn + 7) % 7;
+  return addDays(iso, -diff);
+}
+
+export function startOfMonth(iso) { return iso.slice(0, 8) + '01'; }
+
+export function addMonths(iso, n) {
+  const [y, m] = iso.split('-').map(Number);
+  return toISO(new Date(y, m - 1 + n, 1));
+}
+
+export function endOfMonth(iso) { return addDays(addMonths(iso, 1), -1); }
+
+// Every date from `fromISO` to `toISOstr`, inclusive.
+export function eachDay(fromISO, toISOstr) {
+  const out = [];
+  for (let d = fromISO; d <= toISOstr; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAYS_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 // 'YYYY-MM-DD' -> '3 Nov'  (adds the year when it is not the current year)
 export function fmtDate(iso) {
@@ -78,6 +106,16 @@ export function fmtDate(iso) {
   const d = parseISO(iso);
   const sameYear = d.getFullYear() === new Date().getFullYear();
   return `${d.getDate()} ${MONTHS[d.getMonth()]}${sameYear ? '' : ' ' + d.getFullYear()}`;
+}
+
+export function fmtMonthYear(iso) {
+  const d = parseISO(iso);
+  return `${MONTHS_LONG[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+export function fmtWeekday(iso, long = false) {
+  const names = long ? WEEKDAYS_LONG : WEEKDAYS;
+  return names[dow(iso)];
 }
 
 export function fmtDateLong(iso) {

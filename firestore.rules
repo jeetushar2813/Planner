@@ -350,6 +350,145 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // ------------------------------------------------------------------ leave
+    //
+    // Members and everyone else ask for leave for themselves (it waits for approval).
+    // Managers and Team Leaders approve or decline for their own team(s); the Director
+    // for everyone. They can also record approved leave for someone in their team.
+    // Only the person or an approver can cancel it. Nothing is ever deleted.
+    // One request is stored for each team the person belongs to.
+
+    match /leaves/{leaveId} {
+
+      function validLeave(d) {
+        return d.keys().hasAll([
+            'userId', 'userName', 'teamId', 'type', 'startDate', 'endDate', 'half', 'reason',
+            'status', 'requestedBy', 'decidedBy', 'decidedAt', 'decisionNote',
+            'createdAt', 'updatedAt', 'lastLogId'
+          ])
+          && d.userId is string
+          && d.userName is string && d.userName.size() <= 100
+          && d.teamId is string
+          && d.type in ['annual', 'sick', 'training', 'other']
+          && d.startDate is string && d.startDate.size() == 10
+          && d.endDate is string && d.endDate.size() == 10 && d.endDate >= d.startDate
+          && d.half in ['full', 'am', 'pm'] && (d.half == 'full' || d.startDate == d.endDate)
+          && d.reason is string && d.reason.size() <= 300
+          && d.status in ['pending', 'approved', 'declined', 'cancelled']
+          && (d.decisionNote == null || (d.decisionNote is string && d.decisionNote.size() <= 300));
+      }
+
+      function approver(teamId) {
+        return isDirector() || (role() in ['manager', 'leader'] && inTeam(teamId));
+      }
+
+      function person(userId) {
+        return get(/databases/$(database)/documents/users/$(userId)).data;
+      }
+
+      function changed() {
+        return request.resource.data.diff(resource.data).affectedKeys();
+      }
+
+      // Your own leave, your approvers and the Director. Deputies see their team's leave
+      // so they can plan, but cannot decide on it. Other members see only their own.
+      allow get, list: if active()
+        && (isDirector()
+            || resource.data.userId == request.auth.uid
+            || (role() in ['manager', 'leader', 'asst_leader'] && inTeam(resource.data.teamId)));
+
+      allow create: if active()
+        && validLeave(request.resource.data)
+        && request.resource.data.requestedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && person(request.resource.data.userId).teamIds.hasAny([request.resource.data.teamId])
+        && person(request.resource.data.userId).name == request.resource.data.userName
+        && (
+          // Own request: waits for approval.
+          (request.resource.data.userId == request.auth.uid
+            && inTeam(request.resource.data.teamId)
+            && request.resource.data.status == 'pending'
+            && request.resource.data.decidedBy == null
+            && request.resource.data.decidedAt == null
+            && request.resource.data.decisionNote == null)
+          ||
+          // Recorded for someone else by their leader: approved at once.
+          (request.resource.data.userId != request.auth.uid
+            && approver(request.resource.data.teamId)
+            && request.resource.data.status == 'approved'
+            && request.resource.data.decidedBy == request.auth.uid
+            && request.resource.data.decidedAt == request.time
+            && request.resource.data.decisionNote == null)
+        )
+        && logged('leave', leaveId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validLeave(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && (
+          // Cancel: the person, or an approver for that team.
+          (changed().hasOnly(['status', 'updatedAt', 'lastLogId'])
+            && request.resource.data.status == 'cancelled'
+            && resource.data.status in ['pending', 'approved']
+            && (resource.data.userId == request.auth.uid || approver(resource.data.teamId)))
+          ||
+          // Decide: an approver, never on their own request (except the Director).
+          (changed().hasOnly(['status', 'decidedBy', 'decidedAt', 'decisionNote', 'updatedAt', 'lastLogId'])
+            && resource.data.status == 'pending'
+            && request.resource.data.status in ['approved', 'declined']
+            && approver(resource.data.teamId)
+            && (resource.data.userId != request.auth.uid || isDirector())
+            && request.resource.data.decidedBy == request.auth.uid
+            && request.resource.data.decidedAt == request.time
+            && (request.resource.data.status == 'approved' || request.resource.data.decisionNote is string))
+        )
+        && logged('leave', leaveId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------- holidays
+    //
+    // Public holidays and team closures. Everyone can read them. The Director sets
+    // holidays for everyone; Managers and Team Leaders set them for their own team.
+
+    match /holidays/{holidayId} {
+
+      function validHoliday(d) {
+        return d.keys().hasAll(['name', 'date', 'teamId', 'active', 'createdAt', 'lastLogId'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+          && d.date is string && d.date.size() == 10
+          && (d.teamId == null || d.teamId is string)
+          && d.active is bool;
+      }
+
+      function mayManage(teamId) {
+        return isDirector()
+          || (role() in ['manager', 'leader'] && teamId != null && inTeam(teamId));
+      }
+
+      allow get, list: if active();
+
+      allow create: if active()
+        && validHoliday(request.resource.data)
+        && mayManage(request.resource.data.teamId)
+        && request.resource.data.createdAt == request.time
+        && logged('holiday', holidayId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validHoliday(request.resource.data)
+        && mayManage(resource.data.teamId)
+        && mayManage(request.resource.data.teamId)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && logged('holiday', holidayId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
     // ------------------------------------------------------------ activity log
 
     match /activityLog/{logId} {
@@ -363,7 +502,7 @@ service cloud.firestore {
           && d.actorId == request.auth.uid
           && d.actorRole == role()
           && d.action is string && d.action.size() <= 40
-          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status']
+          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday']
           && d.entityId is string
           && d.entityTitle is string && d.entityTitle.size() <= 300
           && (d.teamId == null || d.teamId is string)

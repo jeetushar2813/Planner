@@ -61,10 +61,23 @@ export const ACTION_LABEL = {
   'project.create': 'Created project',
   'project.update': 'Edited project',
   'status.create': 'Created status',
-  'status.update': 'Edited status'
+  'status.update': 'Edited status',
+  'leave.request': 'Requested leave',
+  'leave.record': 'Recorded leave',
+  'leave.approve': 'Approved leave',
+  'leave.decline': 'Declined leave',
+  'leave.cancel': 'Cancelled leave',
+  'holiday.create': 'Added holiday',
+  'holiday.update': 'Edited holiday'
 };
 
-export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status'];
+export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday'];
+
+// Leave. Only APPROVED leave counts towards availability on the calendar.
+export const LEAVE_TYPES = ['annual', 'sick', 'training', 'other'];
+export const LEAVE_TYPE_LABEL = { annual: 'Annual leave', sick: 'Sick / medical leave', training: 'Training', other: 'Other' };
+export const LEAVE_STATUS_LABEL = { pending: 'Waiting for approval', approved: 'Approved', declined: 'Declined', cancelled: 'Cancelled' };
+export const HALF_LABEL = { full: 'Full day', am: 'Morning only', pm: 'Afternoon only' };
 
 // How long cached reference data (people, teams, statuses, projects) is reused
 // before it is read again. This is the main protection for the free quota.

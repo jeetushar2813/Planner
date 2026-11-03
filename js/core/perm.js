@@ -105,3 +105,23 @@ export function logScopeLabel(user) {
   if (isLeaderUp(user)) return 'Your team(s)';
   return 'Your own activity';
 }
+
+// ---- leave
+// Anyone requests leave for themselves. Approving and recording leave for others is for
+// Team Leaders, Managers and the Director (inside their own team; the Director anywhere).
+export const canApproveLeave = (u, leave) =>
+  (isDirector(u) || (isLeaderUp(u) && inTeam(u, leave.teamId))) && (leave.userId !== u.id || isDirector(u));
+export const canRecordLeaveFor = (u, person, teamId) =>
+  isDirector(u) || (isLeaderUp(u) && inTeam(u, teamId) && (person.teamIds || []).includes(teamId));
+export const canCancelLeave = (u, leave) =>
+  leave.status === 'pending' || leave.status === 'approved'
+    ? (leave.userId === u.id || isDirector(u) || (isLeaderUp(u) && inTeam(u, leave.teamId)))
+    : false;
+// Who can see other people's leave: leaders and deputies (inside their teams), the Director everywhere.
+export const canSeeTeamLeave = (u) => isDeputyUp(u);
+// Public holidays: the Director for everyone, Managers and Team Leaders for their own team.
+export const canManageHolidays = (u) => isLeaderUp(u);
+export const canEditHoliday = (u, holiday) =>
+  isDirector(u) || (isLeaderUp(u) && !!holiday.teamId && inTeam(u, holiday.teamId));
+// The Team Overview and resource planning are for people who run work.
+export const canSeeOverview = (u) => isDeputyUp(u);

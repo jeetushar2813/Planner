@@ -4,9 +4,9 @@
 // screens still hide actions by role, but real protection only exists with Firebase.
 
 import { DEFAULT_STATUSES } from '../core/model.js';
-import { addDays, todayISO, uid20 } from '../core/util.js';
+import { addDays, todayISO, uid20, dow } from '../core/util.js';
 
-const STORE_KEY = 'planner-demo-v1';
+const STORE_KEY = 'planner-demo-v2';
 const SESSION_KEY = 'planner-demo-session';
 const SERVER_TS = { __serverTimestamp: true };
 
@@ -278,6 +278,43 @@ function seed() {
       summary: `Created task "${title}"`
     });
   });
+
+  // A few weeks of finished work so the charts have something to show.
+  const finishers = [['mei', 'content'], ['omar', 'content'], ['arun', 'content'], ['lena', 'content'], ['priya', 'dev'], ['raj', 'dev'], ['devi', 'dev']];
+  for (let i = 0; i < 30; i++) {
+    const [ownerId, teamId] = finishers[i % finishers.length];
+    const doneOffset = -(1 + Math.floor(i * 1.8));
+    const late = i % 4 === 0 || i % 9 === 0;
+    const id = 'h' + String(i + 1).padStart(2, '0');
+    put('tasks', id, {
+      title: 'Finished work item ' + (i + 1), description: '', teamId, projectId: teamId === 'content' ? 'p_edu' : 'p_game',
+      ownerId, createdBy: teamId === 'content' ? 'lena' : 'devi',
+      status: 'completed', statusCategory: 'done', statusNote: null, priority: 'medium',
+      startDate: day(doneOffset - 6), dueDate: day(doneOffset + (late ? -2 : 1)), estimateHours: 4, checklist: [], archived: false,
+      completedAt: new Date(now.getTime() + doneOffset * 86400000), completedDate: day(doneOffset),
+      submits: 1, reworks: i % 6 === 0 ? 1 : 0,
+      createdAt: new Date(now.getTime() + (doneOffset - 6) * 86400000), updatedAt: now, lastLogId: 'seed'
+    });
+  }
+
+  // Leave and holidays (moved to weekdays so they show up on the calendar).
+  const weekday = (offset) => { let d = day(offset); while ([0, 6].includes(dow(d))) d = addDays(d, 1); return d; };
+  const leave = (id, userId, teamId, type, from, to, status, half = 'full', reason = '') => {
+    const person = people.find((p) => p[0] === userId);
+    put('leaves', id, {
+      userId, userName: person[1], teamId, type, startDate: from, endDate: to, half, reason, status,
+      requestedBy: userId, decidedBy: status === 'approved' ? 'lena' : null, decidedAt: status === 'approved' ? now : null,
+      decisionNote: null, createdAt: now, updatedAt: now, lastLogId: 'seed'
+    });
+  };
+  leave('l1', 'mei', 'content', 'annual', weekday(2), weekday(4), 'approved', 'full', 'Family event');
+  leave('l2', 'priya', 'dev', 'sick', weekday(1), weekday(1), 'approved', 'am');
+  leave('l3', 'omar', 'content', 'annual', weekday(9), weekday(11), 'pending', 'full', 'Short trip');
+  leave('l4', 'raj', 'dev', 'training', weekday(5), weekday(5), 'approved', 'full', 'Unity workshop');
+  leave('l5', 'arun', 'content', 'annual', weekday(14), weekday(18), 'approved');
+  const holiday = (id, name, date, teamId) => put('holidays', id, { name, date, teamId, active: true, createdAt: now, lastLogId: 'seed' });
+  holiday('hol1', 'Company day off (sample)', weekday(12), null);
+  holiday('hol2', 'Content team offsite (sample)', weekday(6), 'content');
 
   put('tasks/t03/comments', 'c_demo1', {
     authorId: 'lena', authorName: 'Lena Wong', text: 'Sent to QC. Please check the BM version first.',

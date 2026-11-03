@@ -363,3 +363,141 @@ describe('activity log', () => {
     await assertFails(setDoc(doc(as('memA1'), 'activityLog', 'f2'), logBody('memA1', 'member', 'task', 'tA1', 'teamA', new Date('2020-01-01'))));
   });
 });
+
+// ---------------------------------------------------------------- leave
+
+describe('leave', () => {
+  const leaveDoc = (uid, over = {}) => ({
+    userId: uid, userName: uid, teamId: USERS[uid].teamIds[0], type: 'annual', startDate: '2026-12-01', endDate: '2026-12-03',
+    half: 'full', reason: '', status: 'pending', requestedBy: uid, decidedBy: null, decidedAt: null, decisionNote: null,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over
+  });
+  const approvedBy = (decider) => ({ status: 'approved', requestedBy: decider, decidedBy: decider, decidedAt: serverTimestamp() });
+  const createLeave = (actor, lid, doc, teamId) => logged(actor, {
+    path: `leaves/${lid}`, kind: 'create', type: 'leave', entityId: lid, teamId: teamId || doc.teamId, data: doc
+  });
+  const decide = (actor, lid, patch, teamId = 'teamA') => logged(actor, {
+    path: `leaves/${lid}`, kind: 'update', type: 'leave', entityId: lid, teamId,
+    data: { updatedAt: serverTimestamp(), ...patch }
+  });
+  const seedPending = async (lid = 'lv1', uid = 'memA1') => env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'leaves', lid), leaveDoc(uid, { createdAt: new Date(), updatedAt: new Date() }));
+  });
+
+  test('a member asks for their own leave and it waits for approval', async () => {
+    await assertSucceeds(createLeave('memA1', 'n1', leaveDoc('memA1')));
+  });
+  test('a member cannot approve their own request when asking', async () => {
+    await assertFails(createLeave('memA1', 'n2', leaveDoc('memA1', approvedBy('memA1'))));
+  });
+  test('a member cannot ask on behalf of a colleague, or for another team', async () => {
+    await assertFails(createLeave('memA1', 'n3', leaveDoc('memA2', { requestedBy: 'memA1' }), 'teamA'));
+    await assertFails(createLeave('memA1', 'n4', leaveDoc('memA1', { teamId: 'teamB' })));
+  });
+  test('leave must have a log entry and valid dates', async () => {
+    await assertFails(setDoc(doc(as('memA1'), 'leaves', 'nolog'), { ...leaveDoc('memA1'), lastLogId: 'x' }));
+    await assertFails(createLeave('memA1', 'n5', leaveDoc('memA1', { startDate: '2026-12-05', endDate: '2026-12-01' })));
+    await assertFails(createLeave('memA1', 'n6', leaveDoc('memA1', { half: 'am' })));   // half day needs a single day
+  });
+  test('a leader records approved leave for someone in their team, not another team', async () => {
+    await assertSucceeds(createLeave('ldrA', 'n7', leaveDoc('memA1', approvedBy('ldrA')), 'teamA'));
+    await assertFails(createLeave('ldrA', 'n8', leaveDoc('memB', approvedBy('ldrA')), 'teamB'));
+  });
+  test('an assistant leader cannot record or approve leave', async () => {
+    await assertFails(createLeave('asstA', 'n9', leaveDoc('memA1', approvedBy('asstA')), 'teamA'));
+    await seedPending();
+    await assertFails(decide('asstA', 'lv1', { status: 'approved', decidedBy: 'asstA', decidedAt: serverTimestamp() }));
+  });
+  test('a leader approves a pending request in their team, with their own name and the server time', async () => {
+    await seedPending();
+    await assertFails(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'memA2', decidedAt: serverTimestamp() }));
+    await assertSucceeds(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+  });
+  test('declining needs a reason', async () => {
+    await seedPending();
+    await assertFails(decide('ldrA', 'lv1', { status: 'declined', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+    await assertSucceeds(decide('ldrA', 'lv1', { status: 'declined', decidedBy: 'ldrA', decidedAt: serverTimestamp(), decisionNote: 'Busy period' }));
+  });
+  test('members, other teams’ leaders and the person themselves cannot approve', async () => {
+    await seedPending();
+    const approve = { status: 'approved', decidedAt: serverTimestamp() };
+    await assertFails(decide('memA2', 'lv1', { ...approve, decidedBy: 'memA2' }));
+    await assertFails(decide('ldrB', 'lv1', { ...approve, decidedBy: 'ldrB' }));
+    await assertFails(decide('memA1', 'lv1', { ...approve, decidedBy: 'memA1' }));
+  });
+  test('a leader cannot approve their own leave, the Director can', async () => {
+    await seedPending('lv2', 'ldrA');
+    await assertFails(decide('ldrA', 'lv2', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+    await assertSucceeds(decide('dir', 'lv2', { status: 'approved', decidedBy: 'dir', decidedAt: serverTimestamp() }));
+  });
+  test('the person can cancel their own leave, a colleague cannot', async () => {
+    await seedPending();
+    await assertFails(decide('memA2', 'lv1', { status: 'cancelled' }));
+    await assertSucceeds(decide('memA1', 'lv1', { status: 'cancelled' }));
+  });
+  test('dates and person cannot be edited afterwards', async () => {
+    await seedPending();
+    await assertFails(decide('memA1', 'lv1', { endDate: '2026-12-31' }));
+    await assertFails(decide('ldrA', 'lv1', { userId: 'memA2' }));
+  });
+  test('who can read leave', async () => {
+    await seedPending();
+    await assertSucceeds(getDocs(query(collection(as('memA1'), 'leaves'), where('userId', '==', 'memA1'))));
+    await assertFails(getDocs(query(collection(as('memA1'), 'leaves'), where('teamId', '==', 'teamA'))));
+    await assertFails(getDoc(doc(as('memA2'), 'leaves', 'lv1')));
+    await assertSucceeds(getDocs(query(collection(as('ldrA'), 'leaves'), where('teamId', '==', 'teamA'))));
+    await assertSucceeds(getDocs(query(collection(as('asstA'), 'leaves'), where('teamId', '==', 'teamA'))));
+    await assertFails(getDocs(query(collection(as('ldrB'), 'leaves'), where('teamId', '==', 'teamA'))));
+    await assertSucceeds(getDocs(collection(as('dir'), 'leaves')));
+  });
+  test('leave is never deleted', async () => {
+    await seedPending();
+    await assertFails(deleteDoc(doc(as('dir'), 'leaves', 'lv1')));
+  });
+});
+
+// ---------------------------------------------------------------- holidays
+
+describe('holidays', () => {
+  const holidayDoc = (teamId) => ({ name: 'Day off', date: '2026-12-25', teamId, active: true, createdAt: serverTimestamp() });
+  const createHoliday = (actor, hid, teamId) => logged(actor, {
+    path: `holidays/${hid}`, kind: 'create', type: 'holiday', entityId: hid, teamId, data: holidayDoc(teamId)
+  });
+  test('everyone signed in reads holidays', async () => {
+    await assertSucceeds(getDocs(collection(as('memA1'), 'holidays')));
+    await assertFails(getDocs(collection(env.unauthenticatedContext().firestore(), 'holidays')));
+  });
+  test('the Director sets a holiday for everyone', async () => {
+    await assertSucceeds(createHoliday('dir', 'h1', null));
+  });
+  test('a leader sets a holiday for their own team only', async () => {
+    await assertSucceeds(createHoliday('ldrA', 'h2', 'teamA'));
+    await assertFails(createHoliday('ldrA', 'h3', 'teamB'));
+    await assertFails(createHoliday('ldrA', 'h4', null));
+  });
+  test('members cannot set holidays', async () => {
+    await assertFails(createHoliday('memA1', 'h5', 'teamA'));
+  });
+  // The Malaysian import writes 8 holidays + 8 log entries per batch.
+  const bulk = (actor, n, teamId = null) => {
+    const db = as(actor), batch = writeBatch(db), role = USERS[actor].role;
+    for (let i = 0; i < n; i++) {
+      const hid = id('bulk'), logId = id('log');
+      batch.set(doc(db, 'holidays', hid), { ...holidayDoc(teamId), lastLogId: logId });
+      batch.set(doc(db, 'activityLog', logId), { ...logBody(actor, role, 'holiday', hid, teamId), action: 'holiday.create' });
+    }
+    return batch.commit();
+  };
+  test('the Director can import a batch of 8 holidays in one write', async () => {
+    await assertSucceeds(bulk('dir', 8));
+  });
+  test('a leader cannot bulk-add holidays for everyone', async () => {
+    await assertFails(bulk('ldrA', 8, null));
+  });
+  test('a holiday can be switched off (not deleted) by someone who may manage it', async () => {
+    await createHoliday('ldrA', 'h6', 'teamA');
+    await assertSucceeds(logged('ldrA', { path: 'holidays/h6', kind: 'update', type: 'holiday', entityId: 'h6', teamId: 'teamA', data: { active: false } }));
+    await assertFails(deleteDoc(doc(as('dir'), 'holidays', 'h6')));
+    await assertFails(logged('ldrB', { path: 'holidays/h6', kind: 'update', type: 'holiday', entityId: 'h6', teamId: 'teamA', data: { name: 'x' } }));
+  });
+});

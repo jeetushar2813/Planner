@@ -10,7 +10,7 @@
 import { firebaseConfig } from '../config.js';
 import {
   INITIAL_STATUS_ID, OPEN_CATEGORIES, REFDATA_TTL_MINUTES, DEFAULT_STATUSES,
-  PRIORITY_LABEL, ROLE_LABEL
+  PRIORITY_LABEL, ROLE_LABEL, LEAVE_TYPES, LEAVE_TYPE_LABEL, LEAVE_STATUS_LABEL, HALF_LABEL
 } from './model.js';
 import { diffFields, summarize, taskAction } from './log.js';
 import { todayISO, toDate } from './util.js';
@@ -107,6 +107,7 @@ async function recordLogin(freshSignIn) {
       log.op
     ]);
     state.user.lastLoginAt = new Date();
+    patchRef('users', { id: state.user.id, lastLoginAt: state.user.lastLoginAt, lastLogId: log.id });
     try { sessionStorage.setItem(key, '1'); } catch { /* ignore */ }
   } catch (err) {
     console.warn('Could not record sign-in', err);
@@ -540,6 +541,217 @@ export async function updateStatus(status, patch) {
   for (const c of changes) data[c.field] = next[c.field];
   await backend.commit([{ type: 'update', path: 'statuses/' + status.id, data }, log.op]);
   patchRef('statuses', { id: status.id, ...data });
+}
+
+
+// ------------------------------------------------------------------------- leave
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function validateLeaveDraft(d) {
+  if (!LEAVE_TYPES.includes(d.type)) return 'Please choose the kind of leave.';
+  if (!DATE_RE.test(d.startDate || '') || !DATE_RE.test(d.endDate || '')) return 'Please choose the first and last day.';
+  if (d.endDate < d.startDate) return 'The last day is before the first day.';
+  if ((d.reason || '').length > 300) return 'The reason is too long (300 characters at most).';
+  if (!d.teamIds || !d.teamIds.length) return 'Please choose at least one team.';
+  return null;
+}
+
+const rangeText = (l) => (l.startDate === l.endDate ? l.startDate : `${l.startDate} to ${l.endDate}`);
+const leaveTitle = (l) => `${l.userName}: ${LEAVE_TYPE_LABEL[l.type] || l.type}, ${rangeText(l)}`;
+
+// Asks for leave for yourself (waits for approval), or records leave for someone else
+// (approved straight away). One request is created for each team, so every team's leader
+// sees it and the team calendars stay accurate. All in one write.
+export async function submitLeave({ person, type, startDate, endDate, half, reason, teamIds, existing = [] }) {
+  const draft = { type, startDate, endDate, half: startDate === endDate ? (half || 'full') : 'full', reason: (reason || '').trim(), teamIds };
+  const problem = validateLeaveDraft(draft);
+  if (problem) throw new Error(problem);
+  const clash = existing.find((l) => l.userId === person.id && ['pending', 'approved'].includes(l.status)
+    && teamIds.includes(l.teamId) && l.startDate <= endDate && l.endDate >= startDate);
+  if (clash) throw new Error(`${person.name} already has leave from ${rangeText(clash)} (${LEAVE_STATUS_LABEL[clash.status].toLowerCase()}).`);
+
+  const forOthers = person.id !== state.user.id;
+  if (forOthers) {
+    for (const teamId of teamIds) {
+      if (!perm.canRecordLeaveFor(state.user, person, teamId)) throw new Error('Your role cannot record leave for that person.');
+    }
+  }
+  const approvedNow = forOthers || perm.isDirector(state.user);
+  const stamp = backend.ts();
+  const ops = [];
+  const created = [];
+  for (const teamId of teamIds) {
+    const id = backend.newId('leaves');
+    const doc = {
+      userId: person.id, userName: person.name, teamId,
+      type: draft.type, startDate, endDate, half: draft.half, reason: draft.reason,
+      status: approvedNow ? 'approved' : 'pending',
+      requestedBy: state.user.id,
+      decidedBy: approvedNow ? state.user.id : null, decidedAt: approvedNow ? stamp : null, decisionNote: null,
+      createdAt: stamp, updatedAt: stamp, lastLogId: ''
+    };
+    const log = makeLog({
+      action: approvedNow ? 'leave.record' : 'leave.request', entityType: 'leave', entityId: id,
+      entityTitle: leaveTitle(doc), teamId,
+      changes: [
+        { field: 'type', from: '', to: LEAVE_TYPE_LABEL[draft.type] },
+        { field: 'startDate', from: '', to: startDate },
+        ...(endDate !== startDate ? [{ field: 'endDate', from: '', to: endDate }] : []),
+        ...(draft.half !== 'full' ? [{ field: 'half', from: '', to: HALF_LABEL[draft.half] }] : []),
+        ...(draft.reason ? [{ field: 'reason', from: '', to: draft.reason.slice(0, 120) }] : [])
+      ]
+    });
+    doc.lastLogId = log.id;
+    ops.push({ type: 'set', path: 'leaves/' + id, data: doc }, log.op);
+    const now = new Date();
+    created.push({ id, ...doc, createdAt: now, updatedAt: now, decidedAt: approvedNow ? now : null });
+  }
+  await backend.commit(ops);
+  emit('leave');
+  return created;
+}
+
+export async function decideLeave(leave, decision, note) {
+  const approve = decision === 'approve';
+  const text = (note || '').trim();
+  if (!approve && !text) throw new Error('Please give a short reason for declining.');
+  if (!perm.canApproveLeave(state.user, leave)) throw new Error('Your role cannot decide on this leave.');
+  const stamp = backend.ts();
+  const status = approve ? 'approved' : 'declined';
+  const log = makeLog({
+    action: approve ? 'leave.approve' : 'leave.decline', entityType: 'leave', entityId: leave.id,
+    entityTitle: leaveTitle(leave), teamId: leave.teamId,
+    changes: [
+      { field: 'status', from: LEAVE_STATUS_LABEL[leave.status], to: LEAVE_STATUS_LABEL[status] },
+      ...(text ? [{ field: 'decisionNote', from: '', to: text.slice(0, 120) }] : [])
+    ]
+  });
+  const patch = { status, decidedBy: state.user.id, decidedAt: stamp, decisionNote: text || null, updatedAt: stamp, lastLogId: log.id };
+  await backend.commit([{ type: 'update', path: 'leaves/' + leave.id, data: patch }, log.op]);
+  emit('leave');
+  const now = new Date();
+  return { ...leave, ...patch, decidedAt: now, updatedAt: now };
+}
+
+export async function cancelLeave(leave) {
+  if (!perm.canCancelLeave(state.user, leave)) throw new Error('This leave cannot be cancelled.');
+  const stamp = backend.ts();
+  const log = makeLog({
+    action: 'leave.cancel', entityType: 'leave', entityId: leave.id, entityTitle: leaveTitle(leave), teamId: leave.teamId,
+    changes: [{ field: 'status', from: LEAVE_STATUS_LABEL[leave.status], to: LEAVE_STATUS_LABEL.cancelled }]
+  });
+  const patch = { status: 'cancelled', updatedAt: stamp, lastLogId: log.id };
+  await backend.commit([{ type: 'update', path: 'leaves/' + leave.id, data: patch }, log.op]);
+  emit('leave');
+  return { ...leave, status: 'cancelled', updatedAt: new Date(), lastLogId: log.id };
+}
+
+// Leave that has not finished yet, for one team (needs the teamId + endDate index).
+export async function loadTeamLeave(teamId, fromISO = todayISO()) {
+  const { docs } = await backend.query('leaves', { where: [['teamId', '==', teamId], ['endDate', '>=', fromISO]] });
+  return docs;
+}
+
+// Everything you asked for yourself (no index needed).
+export async function loadMyLeave() {
+  const { docs } = await backend.query('leaves', { where: [['userId', '==', state.user.id]], limit: 200 });
+  return docs;
+}
+
+export async function loadPendingLeave(teamId) {
+  const { docs } = await backend.query('leaves', { where: [['teamId', '==', teamId], ['status', '==', 'pending']] });
+  return docs;
+}
+
+// ---------------------------------------------------------------------- holidays
+
+export async function loadHolidays(fromISO = todayISO()) {
+  const { docs } = await backend.query('holidays', { where: [['date', '>=', fromISO]], orderBy: [['date', 'asc']] });
+  return docs;
+}
+
+function validateHoliday(d) {
+  if (!(d.name || '').trim()) return 'Please give the holiday a name.';
+  if (d.name.trim().length > 100) return 'The name is too long (100 characters at most).';
+  if (!DATE_RE.test(d.date || '')) return 'Please choose the date.';
+  return null;
+}
+
+export async function createHoliday({ name, date, teamId }) {
+  const problem = validateHoliday({ name, date });
+  if (problem) throw new Error(problem);
+  if (!teamId && !perm.isDirector(state.user)) throw new Error('Only the Director can add a holiday for everyone. Choose your team instead.');
+  const id = backend.newId('holidays');
+  const log = makeLog({
+    action: 'holiday.create', entityType: 'holiday', entityId: id, entityTitle: `${name.trim()} (${date})`, teamId: teamId || null,
+    changes: [{ field: 'date', from: '', to: date }, { field: 'teamId', from: '', to: teamId ? teamName(teamId) : 'Everyone' }]
+  });
+  const doc = { name: name.trim(), date, teamId: teamId || null, active: true, createdAt: backend.ts(), lastLogId: log.id };
+  await backend.commit([{ type: 'set', path: 'holidays/' + id, data: doc }, log.op]);
+  emit('leave');
+  return { id, ...doc, createdAt: new Date() };
+}
+
+// ---- bulk add (the bundled Malaysian list). Director only, always "everyone".
+// A holiday counts as already added when the same name is on the same date for everyone,
+// so running the import twice never doubles anything.
+const holidayKey = (date, name) => `${date}|${name.trim().toLowerCase()}`;
+const IMPORT_BATCH = 8; // 8 holidays = 16 writes, safely inside the rules' document-access limit
+
+export async function planHolidayImport(items) {
+  if (!items.length) return { fresh: [], existing: [] };
+  const from = items.map((i) => i.date).sort()[0];
+  const have = new Set((await loadHolidays(from))
+    .filter((x) => x.active !== false && !x.teamId).map((x) => holidayKey(x.date, x.name)));
+  const fresh = [], existing = [];
+  for (const i of items) (have.has(holidayKey(i.date, i.name)) ? existing : fresh).push(i);
+  return { fresh, existing };
+}
+
+export async function importHolidays(items) {
+  if (!perm.isDirector(state.user)) throw new Error('Only the Director can add holidays for everyone.');
+  for (const i of items) { const p = validateHoliday(i); if (p) throw new Error(`${i.name || 'Holiday'}: ${p}`); }
+  const { fresh, existing } = await planHolidayImport(items);
+  let added = 0;
+  try {
+    for (let n = 0; n < fresh.length; n += IMPORT_BATCH) {
+      const ops = [];
+      for (const i of fresh.slice(n, n + IMPORT_BATCH)) {
+        const id = backend.newId('holidays');
+        const log = makeLog({
+          action: 'holiday.create', entityType: 'holiday', entityId: id, entityTitle: `${i.name.trim()} (${i.date})`, teamId: null,
+          changes: [{ field: 'date', from: '', to: i.date }, { field: 'teamId', from: '', to: 'Everyone' }]
+        });
+        ops.push({ type: 'set', path: 'holidays/' + id, data: { name: i.name.trim(), date: i.date, teamId: null, active: true, createdAt: backend.ts(), lastLogId: log.id } }, log.op);
+      }
+      await backend.commit(ops);
+      added += Math.min(IMPORT_BATCH, fresh.length - n);
+    }
+  } catch (err) {
+    emit('leave');
+    throw new Error(`${added} of ${fresh.length} holidays were added before it stopped (${err.message}). Run it again to add the rest.`);
+  }
+  if (added) emit('leave');
+  return { added, skipped: existing.length };
+}
+
+export async function updateHoliday(holiday, patch) {
+  const next = { ...holiday, ...patch, name: (patch.name ?? holiday.name).trim() };
+  const problem = validateHoliday(next);
+  if (problem) throw new Error(problem);
+  if (!next.teamId && !perm.isDirector(state.user)) throw new Error('Only the Director can make a holiday apply to everyone.');
+  const changes = diffFields(holiday, next, ['name', 'date', 'teamId', 'active'], resolveForLog);
+  if (!changes.length) return holiday;
+  const log = makeLog({
+    action: 'holiday.update', entityType: 'holiday', entityId: holiday.id,
+    entityTitle: `${next.name} (${next.date})`, teamId: next.teamId || null, changes
+  });
+  const data = { lastLogId: log.id };
+  for (const c of changes) data[c.field] = next[c.field] ?? null;
+  await backend.commit([{ type: 'update', path: 'holidays/' + holiday.id, data }, log.op]);
+  emit('leave');
+  return { ...holiday, ...data };
 }
 
 // -------------------------------------------------------------------- activity log
