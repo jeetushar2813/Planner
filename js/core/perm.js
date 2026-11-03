@@ -25,8 +25,17 @@ export function visibleTeams(user, allTeams) {
   return isDirector(user) ? active : active.filter((t) => inTeam(user, t.id));
 }
 
+// ---- project owners
+// One person owns each project (set by a Team Leader, Manager or Director). The store keeps
+// the ids of the projects a person owns on their user record as `ownedProjectIds`.
+export const ownsProject = (u, projectId) => !!projectId && (u?.ownedProjectIds || []).includes(projectId);
+export const ownsAnyProject = (u) => (u?.ownedProjectIds || []).length > 0;
+// A project owner's reach over a task: it is in their project and belongs to someone else.
+export const ownsProjectTask = (u, task) => ownsProject(u, task.projectId) && task.ownerId !== u.id;
+
 export function canViewTask(user, task) {
-  return isDirector(user) || task.ownerId === user.id || inTeam(user, task.teamId);
+  return isDirector(user) || task.ownerId === user.id || inTeam(user, task.teamId)
+    || task.createdBy === user.id || ownsProject(user, task.projectId);
 }
 
 // Can this person create tasks at all, and for whom?
@@ -51,7 +60,8 @@ export function canChangeDeadline(user, task) {
   return isLeaderUp(user) && inTeam(user, task.teamId);
 }
 
-export function canReassign(user, task) { return canEditDetails(user, task); }
+// Project owners can hand a task of their project to anyone (in that person's team).
+export function canReassign(user, task) { return canEditDetails(user, task) || ownsProjectTask(user, task); }
 
 export function canArchive(user, task) {
   if (isDirector(user)) return true;
@@ -63,10 +73,13 @@ export function canArchive(user, task) {
 export function allowedStatuses(user, task, statuses, team) {
   const usable = statuses.filter((s) => s.active !== false);
   if (isDirector(user)) return usable;
+  // A project owner approves or sends back work that is waiting in Review (not their own).
+  const reviewer = ownsProjectTask(user, task) && task.statusCategory === 'review' ? usable : [];
   if (!isMember(user)) {
-    return inTeam(user, task.teamId) ? usable : [];
+    return inTeam(user, task.teamId) ? usable : reviewer;
   }
-  if (task.ownerId !== user.id || !inTeam(user, task.teamId)) return [];
+  if (task.ownerId !== user.id) return reviewer;
+  if (!inTeam(user, task.teamId)) return [];
   if (['done', 'closed'].includes(task.statusCategory)) return []; // only leaders reopen
   const gateOff = team && team.approvalGate === false;
   return usable.filter((s) => ['todo', 'active', 'review', 'paused'].includes(s.category)
@@ -87,7 +100,7 @@ export function canComment(user, task) { return canViewTask(user, task); }
 // Whether any edit at all is possible (shows the Save button).
 export function canEditAnything(user, task, statuses, team) {
   return canEditDetails(user, task) || canChangeStatus(user, task, statuses, team)
-    || canTickChecklist(user, task);
+    || canTickChecklist(user, task) || canReassign(user, task);
 }
 
 // ---- admin areas
@@ -125,3 +138,10 @@ export const canEditHoliday = (u, holiday) =>
   isDirector(u) || (isLeaderUp(u) && !!holiday.teamId && inTeam(u, holiday.teamId));
 // The Team Overview and resource planning are for people who run work.
 export const canSeeOverview = (u) => isDeputyUp(u);
+
+// Reports (week, month, quarter, year) for teams and people: Assistant Team Leaders and above.
+// Project owners get reports for their own projects, even when they are team members.
+export const canSeeReports = (u) => isDeputyUp(u) || ownsAnyProject(u);
+export const canSeeTeamReports = (u) => isDeputyUp(u);
+// The "My projects" page is for people who own a project, and for leaders who hand work to others.
+export const canSeeProjects = (u) => ownsAnyProject(u) || isDeputyUp(u);

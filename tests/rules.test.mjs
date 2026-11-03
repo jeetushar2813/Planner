@@ -312,6 +312,32 @@ describe('people', () => {
   test('accounts are never deleted', async () => {
     await assertFails(deleteDoc(doc(as('dir'), 'users', 'memA1')));
   });
+
+  // Colour theme: a personal preference, changed without a log entry.
+  test('anyone may pick their own colour theme', async () => {
+    await assertSucceeds(updateDoc(doc(as('memA1'), 'users', 'memA1'), { theme: 'midnight' }));
+    await assertSucceeds(updateDoc(doc(as('dir'), 'users', 'dir'), { theme: 'corporate' }));
+  });
+  test('nobody changes someone else\'s theme', async () => {
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA2'), { theme: 'dark' }));
+    await assertFails(updateDoc(doc(as('ldrA'), 'users', 'memA1'), { theme: 'dark' }));
+  });
+  test('a theme must be one of the known names', async () => {
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { theme: 'neon' }));
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { theme: 7 }));
+  });
+  test('the theme shortcut cannot smuggle in other changes', async () => {
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { theme: 'dark', role: 'director' }));
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { theme: 'dark', teamIds: ['teamB'] }));
+  });
+  test('a deactivated person cannot change their theme', async () => {
+    await assertFails(updateDoc(doc(as('gone'), 'users', 'gone'), { theme: 'dark' }));
+  });
+  // Changing your own password writes only a log entry ("user.password"), never the password.
+  test('a person can log that they changed their own password', async () => {
+    await assertSucceeds(setDoc(doc(as('memA1'), 'activityLog', id('pw')),
+      { ...logBody('memA1', 'member', 'user', 'memA1', 'teamA'), action: 'user.password' }));
+  });
 });
 
 describe('teams, projects, statuses', () => {
@@ -499,5 +525,99 @@ describe('holidays', () => {
     await assertSucceeds(logged('ldrA', { path: 'holidays/h6', kind: 'update', type: 'holiday', entityId: 'h6', teamId: 'teamA', data: { active: false } }));
     await assertFails(deleteDoc(doc(as('dir'), 'holidays', 'h6')));
     await assertFails(logged('ldrB', { path: 'holidays/h6', kind: 'update', type: 'holiday', entityId: 'h6', teamId: 'teamA', data: { name: 'x' } }));
+  });
+});
+
+// ------------------------------------------------------------ project owners
+// memA1 (a plain member of team A) owns project "pOwned". Work in it is held by people in
+// team B and team C, so the owner reaches across teams without being a leader there.
+
+describe('project owners', () => {
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      const project = (ownerId) => ({ name: 'P', teamId: 'teamA', description: '', active: true, ownerId, createdAt: new Date(), lastLogId: 'seedlog' });
+      await setDoc(doc(db, 'projects', 'pOwned'), project('memA1'));
+      await setDoc(doc(db, 'projects', 'pOther'), project('ldrA'));
+      await setDoc(doc(db, 'projects', 'pOld'), { name: 'Old', teamId: 'teamA', description: '', active: true, createdAt: new Date(), lastLogId: 'seedlog' }); // no owner field
+      await setDoc(doc(db, 'tasks', 'pB1'), taskDoc({ ownerId: 'memB', teamId: 'teamB', projectId: 'pOwned', createdBy: 'ldrB' }));
+      await setDoc(doc(db, 'tasks', 'pBrev'), taskDoc({ ownerId: 'memB', teamId: 'teamB', projectId: 'pOwned', createdBy: 'ldrB', status: 'review', statusCategory: 'review' }));
+      await setDoc(doc(db, 'tasks', 'pCrev'), taskDoc({ ownerId: 'memC', teamId: 'teamC', projectId: 'pOwned', createdBy: 'ldrB', status: 'review', statusCategory: 'review' }));
+      await setDoc(doc(db, 'tasks', 'pOtherB'), taskDoc({ ownerId: 'memB', teamId: 'teamB', projectId: 'pOther', createdBy: 'ldrB' }));
+      await setDoc(doc(db, 'tasks', 'pOldB'), taskDoc({ ownerId: 'memB', teamId: 'teamB', projectId: 'pOld', createdBy: 'ldrB' }));
+      await setDoc(doc(db, 'tasks', 'ownReview'), taskDoc({ ownerId: 'memA1', teamId: 'teamA', projectId: 'pOwned', createdBy: 'ldrA', status: 'review', statusCategory: 'review' }));
+    });
+  });
+
+  test('the owner reads every task in the project, in any team', async () => {
+    await assertSucceeds(getDoc(doc(as('memA1'), 'tasks', 'pB1')));
+    await assertSucceeds(getDoc(doc(as('memA1'), 'tasks', 'pCrev')));
+  });
+  test('the owner can list a project by project id (the query the app runs)', async () => {
+    await assertSucceeds(getDocs(query(collection(as('memA1'), 'tasks'), where('projectId', '==', 'pOwned'),
+      where('archived', '==', false), where('statusCategory', 'in', ['todo', 'active', 'review', 'paused']))));
+    await assertSucceeds(getDocs(query(collection(as('memA1'), 'tasks'), where('projectId', '==', 'pOwned'), where('statusCategory', '==', 'done'))));
+  });
+  test('owning one project gives no view of another project or of a project without an owner', async () => {
+    await assertFails(getDoc(doc(as('memA1'), 'tasks', 'pOtherB')));
+    await assertFails(getDoc(doc(as('memA1'), 'tasks', 'pOldB')));
+    await assertFails(getDocs(query(collection(as('memA1'), 'tasks'), where('projectId', '==', 'pOther'))));
+  });
+  test('someone who owns nothing cannot list a project they do not own', async () => {
+    await assertFails(getDocs(query(collection(as('memA2'), 'tasks'), where('projectId', '==', 'pOwned'))));
+  });
+  test('a person reads the tasks they handed to someone in another team', async () => {
+    await assertSucceeds(getDocs(query(collection(as('ldrB'), 'tasks'), where('createdBy', '==', 'ldrB'))));
+    await assertFails(getDocs(query(collection(as('memA2'), 'tasks'), where('createdBy', '==', 'ldrB'))));
+  });
+  test('the owner reads and writes comments on tasks in the project', async () => {
+    await assertSucceeds(getDocs(collection(as('memA1'), 'tasks', 'pB1', 'comments')));
+    await assertFails(getDocs(collection(as('memA2'), 'tasks', 'pB1', 'comments')));
+  });
+
+  test('the owner gives a task in the project to a person in another team', async () => {
+    await assertSucceeds(createTask('memA1', 'newX', { ownerId: 'memC', teamId: 'teamC', projectId: 'pOwned' }));
+  });
+  test('the person who gets it must be in the task\'s team', async () => {
+    await assertFails(createTask('memA1', 'newY', { ownerId: 'memC', teamId: 'teamB', projectId: 'pOwned' }));
+  });
+  test('a member who does not own the project cannot give work to others', async () => {
+    await assertFails(createTask('memA2', 'newZ', { ownerId: 'memC', teamId: 'teamC', projectId: 'pOwned' }));
+    await assertFails(createTask('memA1', 'newW', { ownerId: 'memC', teamId: 'teamC', projectId: 'pOther' }));
+  });
+  test('the owner reassigns a task to another person and team', async () => {
+    await assertSucceeds(updateTask('memA1', 'pB1', { ownerId: 'memC', teamId: 'teamC' }, 'teamB'));
+  });
+  test('the owner cannot move a task to a person outside the new team', async () => {
+    await assertFails(updateTask('memA1', 'pB1', { ownerId: 'memC', teamId: 'teamB' }, 'teamB'));
+  });
+  test('the owner approves work that is in Review', async () => {
+    await assertSucceeds(updateTask('memA1', 'pBrev', toDone, 'teamB'));
+  });
+  test('the owner sends work back from Review', async () => {
+    await assertSucceeds(updateTask('memA1', 'pCrev', { status: 'inprogress', statusCategory: 'active', reworks: 1 }, 'teamC'));
+  });
+  test('the owner cannot finish work that is not in Review', async () => {
+    await assertFails(updateTask('memA1', 'pB1', toDone, 'teamB'));
+  });
+  test('the owner cannot edit other people\'s details', async () => {
+    await assertFails(updateTask('memA1', 'pB1', { title: 'Renamed' }, 'teamB'));
+    await assertFails(updateTask('memA1', 'pB1', { dueDate: '2027-01-01' }, 'teamB'));
+    await assertFails(updateTask('memA1', 'pB1', { priority: 'urgent' }, 'teamB'));
+    await assertFails(updateTask('memA1', 'pB1', { archived: true }, 'teamB'));
+    await assertFails(updateTask('memA1', 'pB1', { projectId: 'pOther' }, 'teamB'));
+  });
+  test('the owner cannot approve their own task', async () => {
+    await assertFails(updateTask('memA1', 'ownReview', toDone, 'teamA'));
+  });
+  test('a person who is not the owner cannot use any of this', async () => {
+    await assertFails(updateTask('memA2', 'pBrev', toDone, 'teamB'));
+    await assertFails(updateTask('memA2', 'pB1', { ownerId: 'memC', teamId: 'teamC' }, 'teamB'));
+  });
+
+  test('a leader or above sets a project owner; a member cannot', async () => {
+    await assertSucceeds(logged('ldrA', { path: 'projects/pOld', kind: 'update', type: 'project', entityId: 'pOld', teamId: 'teamA', data: { ownerId: 'memA2' } }));
+    await assertFails(logged('memA1', { path: 'projects/pOwned', kind: 'update', type: 'project', entityId: 'pOwned', teamId: 'teamA', data: { ownerId: 'memA1' } }));
+    await assertFails(logged('memA1', { path: 'projects/pOwned', kind: 'update', type: 'project', entityId: 'pOwned', teamId: 'teamA', data: { name: 'Mine now' } }));
   });
 });

@@ -5,7 +5,8 @@ for the app itself), Firebase Authentication + Firestore for data, hosted free o
 
 **Status:** Phase 0 and Phase 1 (login, roles, tasks, statuses, activity log, people, teams, projects) plus
 the Calendar, Leave and Team overview pages are built.
-Not built yet: downloadable day/week/month/quarter/year reports, Excel import, bulk creation, recurring tasks.
+Reports, Malaysian holidays and project owners are built too.
+Not built yet: Excel import, bulk creation, recurring tasks.
 
 Start with **SETUP.md**.
 
@@ -31,6 +32,24 @@ Start with **SETUP.md**.
 - **Team overview** (Assistant Team Leader and above): filter by team and person. Status breakdown, workload per person,
   completed per week (on time vs late), on-time rate, 14-day availability grid, needs-attention list, deadlines for the
   next 7 days, and a team roster with last sign-in. Numbers are explained at the bottom of the page.
+- **Reports** (Assistant Team Leader and above): a weekly, monthly, quarterly, yearly or custom-date report for a team or one
+  person, to use in progress meetings. It has headline figures compared with the previous period, tasks completed on time and
+  late, individual scorecards, a project breakdown, the tasks completed and still open, and leave and public holidays. Save it
+  as PDF (the browser's print window, choose "Save as PDF") or download it as an Excel workbook with a sheet for each part and
+  every task listed. Quarters follow the calendar year unless `fiscalYearStartMonth` is set in `js/config.js`.
+- **Project owners** (any person, in any team): a Team Leader, Manager or the Director sets one owner per project in
+  Teams & projects. The owner sees every task in that project, even tasks held by people in other teams, can create tasks
+  for anyone and reassign tasks, and approves or sends back work that is in Review. They cannot edit other people's task
+  details (title, description, dates, priority, checklist) or archive anything. The **My projects** page shows the owner's
+  open tasks, work waiting for review (Approve / Send back), who is carrying what, and "Handed to others" (open tasks the
+  person created for someone else). Reports has a **Project** view for owners (the Director can pick any project).
+  A task always belongs to the team of the person who gets it, so giving work to someone in another team moves the task
+  into that team. People can also always see tasks they created for someone else.
+- **My profile** (everyone; click your name in the sidebar): your details, **change your own password** (you type your
+  current one first, so the Director does not need to send a reset email), and a **colour theme** picker: Match my device,
+  Light, Dark, Corporate, Monochrome blue, Slate, Colourful, Purple, Midnight purple and Forest. The choice is saved on your
+  account (so it follows you to other devices) and in the browser (so it shows before you sign in). Password changes are
+  noted in the activity log; the password itself is never stored there. The colours live in `css/themes.css`.
 - **Malaysian public holidays (Kuala Lumpur):** on the Leave page the Director can press "Add Malaysian holidays" to load the
   2026 and 2027 lists (national holidays, plus the Kuala Lumpur ones: New Year's Day, Thaipusam, Federal Territory Day and
   Nuzul Al-Quran, and the replacement days for Sunday holidays). Running it twice never doubles anything, and each holiday can
@@ -48,6 +67,9 @@ Start with **SETUP.md**.
 | `js/backend/firebase.js` / `demo.js` | Real backend and the demo backend (same interface). |
 | `js/core/` | Data layer (`store.js`), permissions (`perm.js`), model, helpers. |
 | `js/ui/` | Screens. |
+| `js/ui/profile.js`, `js/core/theme.js`, `css/themes.css` | My profile page, and the colour themes. |
+| `js/ui/projects.js` | The My projects page for project owners. |
+| `js/core/report.js`, `reportExport.js`, `xlsx.js` | Report maths, the Excel sheets, and a small Excel file writer (no libraries). |
 | `js/data/holidays-my-kl.js` | Bundled Malaysian (Kuala Lumpur) public holidays. Add a new year here each December. |
 | `firestore.rules` | The real security. Roles and the log requirement are enforced here. |
 | `firestore.indexes.json` | Indexes needed for finished-task and log queries. |

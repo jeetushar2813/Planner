@@ -146,6 +146,15 @@ export const backend = {
 
   async resetPassword() { /* demo: nothing to send */ },
 
+  async changePassword(currentPassword, newPassword) {
+    const entry = auth[currentUid];
+    if (!entry || entry.password !== currentPassword) {
+      const err = new Error('Wrong password.'); err.code = 'auth/invalid-credential'; throw err;
+    }
+    entry.password = newPassword;
+    save();
+  },
+
   async createAccount(email, password) {
     if (Object.values(auth).some((a) => a.email.toLowerCase() === email.toLowerCase())) {
       const err = new Error('That email already has an account.');
@@ -224,8 +233,8 @@ function seed() {
   put('teams', 'content', { name: 'Content Team', approvalGate: true, active: true, createdAt: now, lastLogId: 'seed' });
   put('teams', 'dev', { name: 'Development Team', approvalGate: true, active: true, createdAt: now, lastLogId: 'seed' });
 
-  put('projects', 'p_edu', { name: 'EduEdge Term 1', teamId: 'content', description: 'Chapter amendments and QC rounds', active: true, createdAt: now, lastLogId: 'seed' });
-  put('projects', 'p_game', { name: 'EduGames Level Build', teamId: 'dev', description: 'Scene integration and releases', active: true, createdAt: now, lastLogId: 'seed' });
+  put('projects', 'p_edu', { name: 'EduEdge Term 1', teamId: 'content', description: 'Chapter amendments and QC rounds', ownerId: 'priya', active: true, createdAt: now, lastLogId: 'seed' });
+  put('projects', 'p_game', { name: 'EduGames Level Build', teamId: 'dev', description: 'Scene integration and releases', ownerId: 'devi', active: true, createdAt: now, lastLogId: 'seed' });
 
   for (const s of DEFAULT_STATUSES) {
     const { id, ...rest } = s;
@@ -249,7 +258,13 @@ function seed() {
     ['Fix audio sync bug', 'dev', 'p_game', 'raj', 'in_progress', 'urgent', -1, 3, 'devi'],
     ['External QC fixes', 'dev', 'p_game', 'raj', 'completed', 'medium', -3, 6, 'devi'],
     ['Approve Q4 content calendar', 'content', null, 'marcus', 'pending', 'medium', 6, 2, 'dana'],
-    ['Review quarterly productivity', 'content', null, 'dana', 'pending', 'low', 14, 3, 'dana']
+    ['Review quarterly productivity', 'content', null, 'dana', 'pending', 'low', 14, 3, 'dana'],
+    // Cross-team work: Priya (Development) owns EduEdge Term 1 and handed a task to Raj;
+    // Devi owns EduGames and asked the Content team for voice scripts.
+    ['Build interactive quiz widget, Chapter 3', 'dev', 'p_edu', 'raj', 'in_review', 'high', 2, 9, 'priya'],
+    ['Export Chapter 5 audio cues', 'dev', 'p_edu', 'priya', 'in_progress', 'medium', 6, 4, 'priya'],
+    ['Write Chinese voice scripts, Level 2', 'content', 'p_game', 'omar', 'pending', 'medium', 7, 6, 'devi'],
+    ['Check voice script timing, Level 1', 'content', 'p_game', 'mei', 'in_review', 'medium', 3, 3, 'devi']
   ];
 
   tasks.forEach(([title, teamId, projectId, ownerId, status, priority, dueOffset, est, createdBy, note], i) => {

@@ -35,6 +35,15 @@ export const backend = {
   signOut() { return fb.signOut(auth); },
   resetPassword(email) { return fb.sendPasswordResetEmail(auth, email); },
 
+  // A signed-in person changes their own password. Firebase asks for the current password
+  // again first (a stolen open browser cannot change it silently).
+  async changePassword(currentPassword, newPassword) {
+    const user = auth.currentUser;
+    if (!user || !user.email) { const e = new Error('Please sign in again.'); e.code = 'auth/requires-recent-login'; throw e; }
+    await fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, currentPassword));
+    await fb.updatePassword(user, newPassword);
+  },
+
   // Creates a login for a new person WITHOUT signing the Director out: a second,
   // temporary Firebase app instance is used for the sign-up and then thrown away.
   async createAccount(email, password) {

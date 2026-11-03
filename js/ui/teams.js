@@ -5,7 +5,7 @@
 import { h, clear } from '../core/util.js';
 import * as perm from '../core/perm.js';
 import {
-  state, bus, teamName, createTeam, updateTeam, createProject, updateProject, myTeams
+  state, bus, teamName, userName, createTeam, updateTeam, createProject, updateProject, myTeams, assignableUsers, userWithTeams
 } from '../core/store.js';
 import { openPanel, toast, errorMessage, field, select, emptyState } from './components.js';
 
@@ -76,16 +76,18 @@ export function renderTeams(container) {
     clear(projectsBox);
     const canManage = perm.canManageProjects(user);
     const visible = new Set(myTeams().map((t) => t.id));
-    const projects = state.ref.projects.filter((p) => visible.has(p.teamId));
+    // Projects of my teams, plus any project I own (it may belong to another team).
+    const projects = state.ref.projects.filter((p) => visible.has(p.teamId) || perm.ownsProject(user, p.id));
     projectsBox.append(h('div', { class: 'row-head' },
       h('h2', null, 'Projects'),
       canManage ? h('button', { type: 'button', class: 'btn btn-primary', onclick: () => projectPanel(null) }, '+ Add project') : null));
     if (!projects.length) { projectsBox.append(emptyState('No projects yet', canManage ? 'A project groups related tasks, for example a product or a term.' : 'Projects are added by Team Leaders and above.')); return; }
     projectsBox.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tasks' },
-      h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Team'), h('th', null, 'Description'), h('th'))),
+      h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Team'), h('th', null, 'Owner'), h('th', null, 'Description'), h('th'))),
       h('tbody', null, projects.map((p) => h('tr', { class: p.active === false ? 'row-muted' : '' },
         h('td', null, h('strong', null, p.name), p.active === false ? h('span', { class: 'chip chip-off' }, 'Inactive') : null),
         h('td', null, teamName(p.teamId)),
+        h('td', null, p.ownerId ? userName(p.ownerId) : h('span', { class: 'muted' }, 'Not set')),
         h('td', { class: 'muted' }, p.description || ''),
         h('td', null, canManage && perm.inScope(user, p.teamId)
           ? h('button', { type: 'button', class: 'btn btn-ghost small', onclick: () => projectPanel(p) }, 'Edit') : null)))))));
@@ -98,9 +100,18 @@ export function renderTeams(container) {
     const nameInput = h('input', { type: 'text', value: project?.name || '', maxlength: 120 });
     const teamSelect = select(teams.map((t) => ({ value: t.id, label: t.name })), project?.teamId || teams[0]?.id || '', { disabled: !isNew && !perm.isDirector(user) });
     const description = h('textarea', { rows: 3, maxlength: 1000, value: project?.description || '' });
+    // One owner per project: any active person, in any team. They see every task in the
+    // project, hand tasks out, and approve work in Review.
+    const people = assignableUsers();
+    const ownerSelect = select([{ value: '', label: 'No owner' },
+      ...people.map((u) => ({ value: u.id, label: userWithTeams(u) })),
+      ...(project?.ownerId && !people.some((u) => u.id === project.ownerId)
+        ? [{ value: project.ownerId, label: userName(project.ownerId) }] : [])], project?.ownerId || '');
     const activeBox = h('input', { type: 'checkbox', checked: project ? project.active !== false : true });
     const form = h('form', { class: 'task-form', novalidate: true },
-      field('Project name', nameInput), field('Team', teamSelect), field('Description', description),
+      field('Project name', nameInput), field('Team', teamSelect),
+      field('Project owner', ownerSelect, 'The owner sees every task in this project, even in other teams, can hand tasks to anyone, and approves or returns work in Review. They cannot edit other people\'s task details.'),
+      field('Description', description),
       !isNew ? h('label', { class: 'check' }, activeBox, ' Project is active') : null,
       h('div', { class: 'form-actions' }, h('div', { class: 'spacer' }),
         h('button', { type: 'button', class: 'btn btn-ghost', onclick: () => panel.close() }, 'Cancel'),
@@ -108,8 +119,8 @@ export function renderTeams(container) {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       try {
-        if (isNew) await createProject({ name: nameInput.value, teamId: teamSelect.value, description: description.value });
-        else await updateProject(project, { name: nameInput.value.trim(), teamId: teamSelect.value, description: description.value, active: activeBox.checked });
+        if (isNew) await createProject({ name: nameInput.value, teamId: teamSelect.value, description: description.value, ownerId: ownerSelect.value || null });
+        else await updateProject(project, { name: nameInput.value.trim(), teamId: teamSelect.value, description: description.value, ownerId: ownerSelect.value || null, active: activeBox.checked });
         toast('Saved.', 'success'); panel.close(); drawProjects();
       } catch (err) { toast(errorMessage(err), 'error'); }
     });

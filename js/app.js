@@ -16,12 +16,17 @@ import { renderActivity } from './ui/activity.js';
 import { renderCalendar } from './ui/calendar.js';
 import { renderLeave } from './ui/leave.js';
 import { renderOverview } from './ui/overview.js';
+import { renderReports } from './ui/reports.js';
+import { renderProjects } from './ui/projects.js';
+import { renderProfile } from './ui/profile.js';
+import { applyTheme, savedTheme } from './core/theme.js';
 import { renderPeople } from './ui/people.js';
 import { renderTeams } from './ui/teams.js';
 import { renderStatuses } from './ui/statuses.js';
 import { avatar, toast, errorMessage, spinner } from './ui/components.js';
 import { openTaskPanel } from './ui/taskform.js';
 
+applyTheme(savedTheme(), { remember: false });   // the colour theme chosen on this device
 const root = $('#app');
 
 // path, label, who may open it, screen
@@ -31,8 +36,11 @@ const ROUTES = [
   { path: 'team', label: 'Team tasks', icon: '▦', allow: () => true, render: renderTeamTasks },
   { path: 'calendar', label: 'Calendar', icon: '▤', allow: () => true, render: renderCalendar },
   { path: 'leave', label: 'Leave', icon: '☂', allow: () => true, render: renderLeave },
+  { path: 'projects', label: 'My projects', icon: '◇', allow: perm.canSeeProjects, render: renderProjects },
   { path: 'overview', label: 'Team overview', icon: '▥', allow: perm.canSeeOverview, render: renderOverview },
+  { path: 'reports', label: 'Reports', icon: '▨', allow: perm.canSeeReports, render: renderReports },
   { path: 'activity', label: 'Activity', icon: '↻', allow: () => true, render: renderActivity },
+  { path: 'profile', label: 'My profile', icon: '◉', allow: () => true, render: renderProfile },
   { path: 'people', label: 'People', icon: '☺', group: 'Manage', allow: perm.canManageUsers, render: renderPeople },
   { path: 'teams', label: 'Teams & projects', icon: '◎', group: 'Manage', allow: perm.isLeaderUp, render: renderTeams },
   { path: 'statuses', label: 'Statuses', icon: '●', group: 'Manage', allow: perm.canManageStatuses, render: renderStatuses }
@@ -129,7 +137,7 @@ function showShell() {
     h('button', { type: 'button', class: 'btn btn-primary btn-block new-task', onclick: () => openTaskPanel({ onSaved: () => route() }) }, '+ New task'),
     nav,
     h('div', { class: 'sidebar-foot' },
-      h('div', { class: 'who' }, avatar(user.name, 34),
+      h('a', { class: 'who', href: '#/profile', title: 'My profile', onclick: () => document.body.classList.remove('nav-open') }, avatar(user.name, 34),
         h('div', null, h('strong', null, user.name), h('div', { class: 'muted small' }, ROLE_LABEL[user.role]))),
       freshness,
       h('div', { class: 'foot-actions' },

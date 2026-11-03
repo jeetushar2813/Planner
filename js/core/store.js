@@ -15,6 +15,7 @@ import {
 import { diffFields, summarize, taskAction } from './log.js';
 import { todayISO, toDate } from './util.js';
 import * as perm from './perm.js';
+import { applyTheme, isTheme } from './theme.js';
 
 let backend = null;
 
@@ -45,6 +46,16 @@ export const projectName = (id) => projectById(id)?.name || '';
 
 export const activeStatuses = () => state.ref.statuses.filter((s) => s.active !== false);
 export const myTeams = () => perm.visibleTeams(state.user, state.ref.teams);
+
+// Projects the signed-in person owns (active ones), and everyone they could hand a task to.
+export const ownedProjects = () => state.ref.projects.filter((p) => p.active !== false && p.ownerId && p.ownerId === state.user?.id);
+export function assignableUsers() {
+  return state.ref.users
+    .filter((u) => u.active !== false && (u.teamIds || []).length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+// "Name (Team, Team)" so a project owner can tell people in different teams apart.
+export const userWithTeams = (u) => `${u.name} (${(u.teamIds || []).map((t) => teamName(t)).join(', ')})`;
 
 // People who can own a task in this team.
 export function ownerCandidates(teamId) {
@@ -87,6 +98,7 @@ export async function startSession(authUser, { freshSignIn = false } = {}) {
   if (doc.active === false) throw new SessionError('inactive', 'This account has been deactivated. Please contact the Director.');
 
   state.user = doc;
+  if (isTheme(doc.theme)) applyTheme(doc.theme);   // the colour theme this person chose, on any device
   await loadRefData();
   await recordLogin(freshSignIn);
   return state.user;
@@ -133,7 +145,18 @@ function applyRef(ref) {
     projects: [...ref.projects].sort((a, b) => a.name.localeCompare(b.name)),
     loadedAt: ref.loadedAt || Date.now()
   };
+  syncOwnedProjects();
   emit('ref');
+}
+
+// Remember which projects the signed-in person owns, so screens and permission checks
+// can answer without reading anything more.
+function syncOwnedProjects() {
+  if (!state.user) return;
+  state.user = {
+    ...state.user,
+    ownedProjectIds: state.ref.projects.filter((p) => p.active !== false && p.ownerId === state.user.id).map((p) => p.id)
+  };
 }
 
 function readRefCache() {
@@ -180,6 +203,7 @@ function patchRef(kind, doc) {
   if (i >= 0) list[i] = { ...list[i], ...doc }; else list.push(doc);
   applyRef({ ...state.ref });
   if (kind === 'users' && doc.id === state.user.id) state.user = { ...state.user, ...doc };
+  syncOwnedProjects();
   writeRefCache();
 }
 
@@ -202,6 +226,43 @@ export function makeLog({ action, entityType, entityId, entityTitle, teamId = nu
       }
     }
   };
+}
+
+// -------------------------------------------------------------------- profile
+
+// Colour theme: shown at once, remembered in this browser, and stored on the person's account so
+// it follows them to other devices. A preference is not business data, so it is not logged.
+export async function setMyTheme(themeId) {
+  if (!isTheme(themeId)) throw new Error('That colour theme does not exist.');
+  applyTheme(themeId);
+  if (state.user.theme === themeId) return;
+  await backend.commit([{ type: 'update', path: 'users/' + state.user.id, data: { theme: themeId } }]);
+  patchRef('users', { id: state.user.id, theme: themeId });
+}
+
+export const PASSWORD_MIN = 8;
+export function validateNewPassword(current, next, confirm) {
+  if (!current) return 'Please type your current password.';
+  if (next.length < PASSWORD_MIN) return `The new password needs at least ${PASSWORD_MIN} characters.`;
+  if (!/[A-Za-z]/.test(next) || !/[0-9]/.test(next)) return 'Please use letters and at least one number in the new password.';
+  if (next === current) return 'The new password must be different from your current one.';
+  if (next !== confirm) return 'The two new passwords do not match.';
+  return null;
+}
+
+// A person changes their own password. The password itself is never stored or logged;
+// only the fact that it was changed is written to the activity log.
+export async function changeMyPassword(current, next, confirm) {
+  const problem = validateNewPassword(current, next, confirm);
+  if (problem) throw new Error(problem);
+  await backend.changePassword(current, next);
+  try {
+    const log = makeLog({
+      action: 'user.password', entityType: 'user', entityId: state.user.id, entityTitle: state.user.name,
+      teamId: (state.user.teamIds || [])[0] ?? null
+    });
+    await backend.commit([log.op]);
+  } catch (err) { console.warn('Password changed, but the log entry could not be written.', err); }
 }
 
 // ---------------------------------------------------------------------- tasks
@@ -253,6 +314,27 @@ export async function loadFinished({ teamId = null, ownerId = null, fromISO }) {
   else if (teamId) where.unshift(['teamId', '==', teamId]);
   const { docs } = await backend.query('tasks', { where });
   return remember(docs);
+}
+
+// ---- project owners
+// Every open task in one project, whichever team the assignee is in.
+export async function loadProjectTasks(projectId) {
+  const { docs } = await backend.query('tasks', { where: [['projectId', '==', projectId], ...openQuery] });
+  return replaceOpen(docs, (t) => t.projectId === projectId);
+}
+
+// Finished tasks in one project. The date filter is applied here, so no extra index is needed.
+export async function loadProjectDone(projectId, fromISO = null) {
+  const { docs } = await backend.query('tasks', { where: [['projectId', '==', projectId], ['statusCategory', '==', 'done']] });
+  remember(docs);
+  return fromISO ? docs.filter((t) => (t.completedDate || '') >= fromISO) : docs;
+}
+
+// Open tasks I created for someone else (in any team).
+export async function loadAssignedByMe() {
+  const { docs } = await backend.query('tasks', { where: [['createdBy', '==', state.user.id], ...openQuery] });
+  remember(docs);
+  return docs.filter((t) => t.ownerId !== state.user.id);
 }
 
 export async function loadArchived(teamId) {
@@ -475,13 +557,14 @@ export async function updateTeam(team, patch) {
 
 // --------------------------------------------------------------------- projects
 
-export async function createProject({ name, teamId, description }) {
+export async function createProject({ name, teamId, description, ownerId = null }) {
   if (!name.trim()) throw new Error('Please enter a project name.');
   if (!teamId) throw new Error('Please choose a team for the project.');
   const id = backend.newId('projects');
   const log = makeLog({ action: 'project.create', entityType: 'project', entityId: id, entityTitle: name.trim(), teamId });
   const doc = {
     name: name.trim(), teamId, description: description || '', active: true,
+    ownerId: ownerId || null,
     createdAt: backend.ts(), lastLogId: log.id
   };
   await backend.commit([{ type: 'set', path: 'projects/' + id, data: doc }, log.op]);
@@ -491,7 +574,8 @@ export async function createProject({ name, teamId, description }) {
 
 export async function updateProject(project, patch) {
   const next = { ...project, ...patch };
-  const changes = diffFields(project, next, ['name', 'teamId', 'description', 'active'], resolveForLog);
+  next.ownerId = next.ownerId || null;
+  const changes = diffFields({ ...project, ownerId: project.ownerId || null }, next, ['name', 'teamId', 'description', 'active', 'ownerId'], resolveForLog);
   if (!changes.length) return;
   const log = makeLog({
     action: 'project.update', entityType: 'project', entityId: project.id, entityTitle: next.name,

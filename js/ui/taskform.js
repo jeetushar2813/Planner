@@ -7,7 +7,7 @@ import { PRIORITIES, PRIORITY_LABEL, INITIAL_STATUS_ID } from '../core/model.js'
 import * as perm from '../core/perm.js';
 import {
   state, myTeams, ownerCandidates, activeStatuses, statusById, teamById, userName, projectName,
-  createTask, updateTask, loadComments, addComment
+  userById, assignableUsers, userWithTeams, createTask, updateTask, loadComments, addComment
 } from '../core/store.js';
 import {
   openPanel, toast, errorMessage, confirmDialog, promptDialog, field, select, statusChip, spinner
@@ -105,7 +105,7 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {
     const team = teamById(draft.teamId);
     if (isNew) {
       return {
-        details: true, deadline: true, reassign: !perm.isMember(user), team: true,
+        details: true, deadline: true, reassign: !perm.isMember(user) || perm.ownsProject(user, draft.projectId), team: true,
         statuses: [], tick: true, archive: false, anything: true
       };
     }
@@ -137,11 +137,42 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {
     saveBtn.disabled = saving || !dirty() || (isNew && !draft.title.trim());
   }
 
+  // A project owner hands work to anyone, in any team. The task then belongs to the team
+  // of the person who gets it (the Security Rules require the owner to be in the task's team).
+  const crossTeam = () => !!draft.projectId && perm.ownsProject(user, draft.projectId);
+
+  function pickOwner(id) {
+    draft.ownerId = id;
+    if (crossTeam()) {
+      const person = userById(id);
+      const theirTeams = person?.teamIds || [];
+      if (theirTeams.length && !theirTeams.includes(draft.teamId)) {
+        const project = state.ref.projects.find((p) => p.id === draft.projectId);
+        draft.teamId = theirTeams.includes(project?.teamId) ? project.teamId : theirTeams[0];
+      }
+    }
+    draw();
+  }
+
+  // After the project changes, make sure the owner still belongs to the task's team.
+  function pickProject(id) {
+    draft.projectId = id;
+    if (!crossTeam() && isNew && !ownerCandidates(draft.teamId).some((o) => o.id === draft.ownerId)) {
+      const mine = ownerCandidates(draft.teamId);
+      draft.ownerId = mine.some((o) => o.id === user.id) ? user.id : mine[0]?.id || '';
+    }
+    draw();
+  }
+
   function draw() {
     const perms = can();
     const teams = myTeams();
-    const owners = ownerCandidates(draft.teamId);
-    const projects = state.ref.projects.filter((p) => p.active !== false && p.teamId === draft.teamId);
+    const cross = crossTeam();
+    const owners = cross
+      ? assignableUsers().map((u) => ({ ...u, label: userWithTeams(u) }))
+      : ownerCandidates(draft.teamId);
+    const projects = state.ref.projects.filter((p) => p.active !== false
+      && (p.teamId === draft.teamId || perm.ownsProject(user, p.id)));
     if (!owners.some((o) => o.id === draft.ownerId)) {
       // Keep an existing owner visible even if they left the team.
       const existing = state.ref.users.find((u) => u.id === draft.ownerId);
@@ -153,7 +184,10 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {
       disabled: !perms.details, 'aria-label': 'Title', class: 'title-input'
     }), 'title');
 
-    const teamOptions = teams.length ? teams : [teamById(draft.teamId)].filter(Boolean);
+    const teamOptions = [...(teams.length ? teams : [])];
+    if (draft.teamId && !teamOptions.some((t) => t.id === draft.teamId)) {
+      const t = teamById(draft.teamId); if (t) teamOptions.push(t);
+    }
     const statusOptions = isNew
       ? [statusById(draft.status)].filter(Boolean)
       : (perms.statuses.some((s) => s.id === draft.status) ? perms.statuses
@@ -167,20 +201,33 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {
       h('div', { class: 'field' }, titleInput),
       h('div', { class: 'grid-2' },
         field('Team', bind(select(teamOptions.map((t) => ({ value: t.id, label: t.name })), draft.teamId,
-          { disabled: !perms.team && !isNew }), 'teamId', { redraw: true })),
-        field('Owner', bind(select(owners.map((o) => ({ value: o.id, label: o.name })), draft.ownerId,
-          { disabled: !perms.reassign }), 'ownerId')),
-        field('Project', bind(select([{ value: '', label: 'No project' },
-          ...projects.map((p) => ({ value: p.id, label: p.name })),
-          ...(draft.projectId && !projects.some((p) => p.id === draft.projectId)
-            ? [{ value: draft.projectId, label: projectName(draft.projectId) || 'Unknown project' }] : [])],
-          draft.projectId, { disabled: !perms.details }), 'projectId')),
+          { disabled: cross || (!perms.team && !isNew) }), 'teamId', { redraw: true }),
+          cross ? 'Follows the person who gets the task.' : null),
+        field('Owner', (() => {
+          const sel = select(owners.map((o) => ({ value: o.id, label: o.label || o.name })), draft.ownerId,
+            { disabled: !perms.reassign });
+          sel.addEventListener('change', () => pickOwner(sel.value));
+          return sel;
+        })(), cross ? 'You own this project, so you can give this task to anyone.' : null),
+        field('Project', (() => {
+          const sel = select([{ value: '', label: 'No project' },
+            ...projects.map((p) => ({ value: p.id, label: p.name })),
+            ...(draft.projectId && !projects.some((p) => p.id === draft.projectId)
+              ? [{ value: draft.projectId, label: projectName(draft.projectId) || 'Unknown project' }] : [])],
+            draft.projectId, { disabled: !perms.details });
+          sel.addEventListener('change', () => pickProject(sel.value));
+          return sel;
+        })()),
         field('Priority', bind(select(PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABEL[p] })), draft.priority,
           { disabled: !perms.details }), 'priority')),
         field('Status', bind(select(statusOptions.map((s) => ({ value: s.id, label: s.name })), draft.status,
           { disabled: !statusSelectable }), 'status', { redraw: true }),
           isNew ? 'New tasks start as Pending.'
-            : (!statusSelectable ? 'Only a leader can change the status of this task.' : null)),
+            : (!statusSelectable
+              ? (perm.ownsProjectTask(user, task)
+                ? 'As project owner you can approve or return this task once it is in Review.'
+                : 'Only a leader can change the status of this task.')
+              : null)),
         field('Estimate (hours)', bind(h('input', {
           type: 'number', min: 0, step: '0.5', value: draft.estimateHours, disabled: !perms.details, placeholder: 'optional'
         }), 'estimateHours')),

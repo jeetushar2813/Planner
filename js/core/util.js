@@ -8,7 +8,12 @@ export function h(tag, attrs, ...children) {
     for (const [key, value] of Object.entries(attrs)) {
       if (value === undefined || value === null || value === false) continue;
       if (key === 'class') node.className = value;
-      else if (key === 'style' && typeof value === 'object') Object.assign(node.style, value);
+      else if (key === 'style' && typeof value === 'object') {
+        // CSS variables (--chip) need setProperty; plain assignment ignores them.
+        for (const [k, v] of Object.entries(value)) {
+          if (k.startsWith('--')) node.style.setProperty(k, v); else node.style[k] = v;
+        }
+      }
       else if (key === 'dataset') Object.assign(node.dataset, value);
       else if (key.startsWith('on') && typeof value === 'function') {
         node.addEventListener(key.slice(2).toLowerCase(), value);

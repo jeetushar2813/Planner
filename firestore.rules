@@ -51,6 +51,16 @@ service cloud.firestore {
         && getAfter(logPath(logId)).data.ts == request.time;
     }
 
+    // The person named as owner of a project. Projects made before owners existed have
+    // no ownerId, so the field is read with a default. New branches that use this are
+    // always placed last in an OR chain, so everyday checks never pay for the extra read.
+    function ownsProject(projectId) {
+      return projectId is string
+        && active()
+        && get(/databases/$(database)/documents/projects/$(projectId)).data.get('ownerId', null)
+             == request.auth.uid;
+    }
+
     function categoryOf(statusId) {
       return get(/databases/$(database)/documents/statuses/$(statusId)).data.category;
     }
@@ -133,7 +143,23 @@ service cloud.firestore {
               && a.dueDate == b.dueDate && a.archived == b.archived
               && (a.ownerId == b.ownerId || ownerInTeam(a)))
           // Team Member: only status, checklist and progress on their own task.
-          || (role() == 'member' && memberMayUpdate(b, a));
+          || (role() == 'member' && memberMayUpdate(b, a))
+          // Project owner (any role): may hand a task of their project to someone else,
+          // and may approve or send back work that is waiting in Review. Nothing else:
+          // titles, dates, priority, checklist, archiving and the project itself stay as they are.
+          || projectOwnerMayUpdate(b, a);
+      }
+
+      function projectOwnerMayUpdate(b, a) {
+        return ownsProject(b.projectId)
+          && a.projectId == b.projectId
+          && b.ownerId != request.auth.uid
+          && changedKeys().hasOnly([
+              'ownerId', 'teamId', 'status', 'statusCategory', 'statusNote', 'completedAt',
+              'completedDate', 'submits', 'reworks', 'updatedAt', 'lastLogId'
+            ])
+          && ((a.ownerId == b.ownerId && a.teamId == b.teamId) || ownerInTeam(a))
+          && (a.statusCategory == b.statusCategory || b.statusCategory == 'review');
       }
 
       function canCreate(d) {
@@ -142,14 +168,19 @@ service cloud.firestore {
               && inTeam(d.teamId) && ownerInTeam(d))
           || (role() == 'member'
               && d.ownerId == request.auth.uid && inTeam(d.teamId)
-              && d.statusCategory in ['todo', 'active']);
+              && d.statusCategory in ['todo', 'active'])
+          // Project owner: may give work in their project to anyone, in that person's team.
+          || (d.projectId is string && ownsProject(d.projectId) && ownerInTeam(d));
       }
 
       // Read: your own tasks, and tasks of your own team(s). Directors read all.
+      // Also tasks in a project you own, and tasks you handed to someone else.
       allow get, list: if active()
         && (isDirector()
             || resource.data.ownerId == request.auth.uid
-            || inTeam(resource.data.teamId));
+            || inTeam(resource.data.teamId)
+            || resource.data.createdBy == request.auth.uid
+            || ownsProject(resource.data.projectId));
 
       allow create: if active()
         && validShape(request.resource.data)
@@ -184,7 +215,9 @@ service cloud.firestore {
         function canSeeParent() {
           return isDirector()
             || parentTask().ownerId == request.auth.uid
-            || inTeam(parentTask().teamId);
+            || inTeam(parentTask().teamId)
+            || parentTask().createdBy == request.auth.uid
+            || ownsProject(parentTask().projectId);
         }
 
         allow get, list: if active() && canSeeParent();
@@ -251,7 +284,17 @@ service cloud.firestore {
           && changedUserKeys().hasOnly(['lastLoginAt', 'lastLogId'])
           && request.resource.data.lastLoginAt == request.time
           && request.resource.data.lastLogId != resource.data.lastLogId
-          && logged('user', userId, request.resource.data.lastLogId));
+          && logged('user', userId, request.resource.data.lastLogId))
+        ||
+        // Everyone may choose their own colour theme (a preference, so it needs no log entry).
+        // Keep this list in step with js/core/theme.js and css/themes.css.
+        (active()
+          && request.auth.uid == userId
+          && changedUserKeys().hasOnly(['theme'])
+          && request.resource.data.theme in [
+               'auto', 'light', 'dark', 'corporate', 'blue', 'slate',
+               'colourful', 'purple', 'midnight', 'forest'
+             ]);
 
       // Accounts are deactivated, never deleted, so history stays attached to a name.
       allow delete: if false;
@@ -298,7 +341,9 @@ service cloud.firestore {
           && d.name is string && d.name.size() > 0 && d.name.size() <= 120
           && d.teamId is string
           && d.description is string && d.description.size() <= 1000
-          && d.active is bool;
+          && d.active is bool
+          // One owner per project, any person. Optional, so older projects stay valid.
+          && (d.get('ownerId', null) == null || d.ownerId is string);
       }
 
       allow get, list: if active();

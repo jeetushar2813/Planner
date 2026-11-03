@@ -56,6 +56,7 @@ export const ACTION_LABEL = {
   'auth.login': 'Signed in',
   'user.create': 'Created account',
   'user.update': 'Edited account',
+  'user.password': 'Changed own password',
   'team.create': 'Created team',
   'team.update': 'Edited team',
   'project.create': 'Created project',

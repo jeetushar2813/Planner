@@ -1,0 +1,159 @@
+/* Colour themes. A person picks one on their Profile page; it is stored on their account and
+   in this browser, and applied with <html data-theme="...">. "Match my device" sets no attribute
+   and follows the light/dark setting in app.css.
+
+   Every theme sets every colour, so nothing leaks through from the device's light or dark mode.
+   The same variables are also given to [data-preview="..."] so the Profile page can draw a small
+   live sample of each theme. Text and button colours were checked for readable contrast
+   (4.5:1 or better); chart colours were checked with the chart palette validator.
+   Keep js/core/theme.js and the "theme" list in firestore.rules in step when adding a theme. */
+
+/* light: Clean and white. */
+:root[data-theme="light"],
+[data-preview="light"] {
+  --bg: #f7f7f8; --surface: #ffffff; --surface-2: #f0f0f2;
+  --text: #18181b; --muted: #62626b; --border: #e2e2e7;
+  --accent: #1f58dc; --accent-soft: #e8efff; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}
+
+/* dark: Easy on the eyes at night. */
+:root[data-theme="dark"],
+[data-preview="dark"] {
+  --bg: #0e1015; --surface: #171a22; --surface-2: #1f232d;
+  --text: #e9ebf0; --muted: #9aa3b4; --border: #2a2f3b;
+  --accent: #6c9bff; --accent-soft: #1d2a4a; --accent-ink: #0b1220;
+  --danger: #ff7a70; --danger-soft: #3a1f1d; --good: #4cc77f; --good-soft: #17301f; --warn: #f0b255; --warn-soft: #36290f;
+  --shadow: 0 1px 2px rgba(0,0,0,.4); --shadow-lg: 0 12px 40px rgba(0,0,0,.6);
+  --viz-1: #3987e5; --viz-2: #d95926; --viz-3: #199e70;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: dark;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}
+
+/* corporate: Business-like, with a navy sidebar. */
+:root[data-theme="corporate"],
+[data-preview="corporate"] {
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #e6eaf0;
+  --text: #1a2433; --muted: #576377; --border: #d3d9e3;
+  --accent: #1e3a8a; --accent-soft: #e0e7f5; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+  --side-bg: #14213d; --side-text: #e5eaf3; --side-muted: #a3b3cf; --side-border: rgba(255,255,255,.12);
+  --side-hover: rgba(255,255,255,.09); --side-active: rgba(255,255,255,.18); --side-active-ink: #ffffff; --side-link: #a9c8ff;
+  --side-btn: #3b6fe0; --side-btn-ink: #ffffff;
+}
+
+/* blue: Calm, every surface in a shade of blue. */
+:root[data-theme="blue"],
+[data-preview="blue"] {
+  --bg: #e8f1fb; --surface: #f6faff; --surface-2: #dae7f6;
+  --text: #0b2540; --muted: #486283; --border: #c2d6ec;
+  --accent: #0b57c9; --accent-soft: #d3e4fa; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+  --side-bg: #dae7f6; --side-border: #c2d6ec; --side-hover: #cadcf1;
+}
+
+/* slate: Quiet cool greys. */
+:root[data-theme="slate"],
+[data-preview="slate"] {
+  --bg: #e7eaee; --surface: #f5f6f8; --surface-2: #dadee4;
+  --text: #1d2330; --muted: #525d70; --border: #c8cdd7;
+  --accent: #475569; --accent-soft: #dbe0e8; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}
+
+/* colourful: Warm and playful, with a colourful sidebar. */
+:root[data-theme="colourful"],
+[data-preview="colourful"] {
+  --bg: #fff7ef; --surface: #ffffff; --surface-2: #fdecd9;
+  --text: #2a1b2e; --muted: #6b5670; --border: #f0dac6;
+  --accent: #c2185b; --accent-soft: #fde0ed; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+  --side-bg: linear-gradient(180deg, #ffeedb 0%, #ffe0ee 55%, #e6e4ff 100%); --side-border: #f0dac6; --side-muted: #6b5670;
+  --side-active: #ffffff; --side-active-ink: #c2185b; --side-hover: rgba(255,255,255,.6);
+}
+
+/* purple: Soft purple. */
+:root[data-theme="purple"],
+[data-preview="purple"] {
+  --bg: #f4f0fb; --surface: #ffffff; --surface-2: #ebe4f6;
+  --text: #1f1633; --muted: #5f5478; --border: #dcd1ee;
+  --accent: #6d28d9; --accent-soft: #ebe0fb; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}
+
+/* midnight: Dark purple for night owls. */
+:root[data-theme="midnight"],
+[data-preview="midnight"] {
+  --bg: #110c1e; --surface: #1a1330; --surface-2: #251b40;
+  --text: #efe9fb; --muted: #aa9fc5; --border: #33284f;
+  --accent: #b794f6; --accent-soft: #2d2150; --accent-ink: #140c26;
+  --danger: #ff7a70; --danger-soft: #3a1f1d; --good: #4cc77f; --good-soft: #17301f; --warn: #f0b255; --warn-soft: #36290f;
+  --shadow: 0 1px 2px rgba(0,0,0,.4); --shadow-lg: 0 12px 40px rgba(0,0,0,.6);
+  --viz-1: #3987e5; --viz-2: #d95926; --viz-3: #199e70;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: dark;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}
+
+/* forest: Fresh greens. */
+:root[data-theme="forest"],
+[data-preview="forest"] {
+  --bg: #ecf4ee; --surface: #fafdfb; --surface-2: #dfebe2;
+  --text: #13261a; --muted: #486351; --border: #c6dacb;
+  --accent: #17703e; --accent-soft: #d7eedf; --accent-ink: #ffffff;
+  --danger: #c0241a; --danger-soft: #fdeceb; --good: #0f7438; --good-soft: #e6f6ec; --warn: #b45309; --warn-soft: #fdf3e1;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08); --shadow-lg: 0 12px 40px rgba(16,24,40,.22);
+  --viz-1: #2a78d6; --viz-2: #dc5420; --viz-3: #12906a;
+  --viz-grid: color-mix(in srgb, var(--border) 85%, var(--surface)); --viz-axis: color-mix(in srgb, var(--muted) 40%, var(--surface)); --viz-tick: var(--muted);
+  --cal-off: var(--surface-2);
+  color-scheme: light;
+  --side-bg: var(--surface); --side-border: var(--border); --side-text: var(--text); --side-muted: var(--muted);
+  --side-hover: var(--surface-2); --side-active: var(--accent-soft); --side-active-ink: var(--accent); --side-link: var(--accent); --side-btn: var(--accent); --side-btn-ink: var(--accent-ink);
+}

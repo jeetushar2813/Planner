@@ -107,7 +107,7 @@ function colPath(x, y, w, hgt, r, roundTop) {
 }
 
 // weeks: [{ label, tip, a, b }]  a = bottom segment (on time), b = top segment (late)
-export function columns({ weeks, aName, bName, ariaLabel }) {
+export function columns({ weeks, aName, bName, ariaLabel, table = true }) {
   const wrap = h('div', { class: 'cols' });
   const maxTotal = Math.max(0, ...weeks.map((w) => w.a + w.b));
   const draw = () => {
@@ -150,7 +150,7 @@ export function columns({ weeks, aName, bName, ariaLabel }) {
   return h('div', null,
     legend([{ name: aName, color: 'var(--viz-1)' }, { name: bName, color: 'var(--viz-2)' }]),
     wrap,
-    tableView(['Week starting', aName, bName, 'Total'], weeks.map((w) => [w.label, w.a, w.b, w.a + w.b])));
+    table ? tableView(['Week starting', aName, bName, 'Total'], weeks.map((w) => [w.label, w.a, w.b, w.a + w.b])) : null);
 }
 
 export { add };

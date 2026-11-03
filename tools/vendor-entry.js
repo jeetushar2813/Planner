@@ -3,7 +3,8 @@
 export { initializeApp, deleteApp } from 'firebase/app';
 export {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut,
-  sendPasswordResetEmail, createUserWithEmailAndPassword
+  sendPasswordResetEmail, createUserWithEmailAndPassword,
+  EmailAuthProvider, reauthenticateWithCredential, updatePassword
 } from 'firebase/auth';
 export {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,

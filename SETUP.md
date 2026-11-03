@@ -115,10 +115,27 @@ Each new version changes some files. To update:
 3. **Publish the rules again** (`firestore.rules` into Firestore > Rules > Publish) whenever the new version says the rules changed.
 4. If a page shows an error that mentions an index, click the link in the browser console (or deploy `firestore.indexes.json`).
 
-### This version (Calendar, Leave, Team overview)
+### This version (Calendar, Leave, Team overview, Reports, Project owners, My profile and themes)
+
+- **My profile:** publish `firestore.rules` (the same publish as for project owners). The new part lets each person save their
+  own colour theme on their account. Until the rules are published the theme still works on that device, and the page says
+  it could not be saved to the account. Changing a password needs no rules change.
+- If **Change password** says "please sign out and sign in again", Firebase wants a recent sign-in: sign out, sign in, retry.
+- Files that changed outside the usual ones: `index.html`, `css/themes.css`, and `js/vendor/firebase.js` (rebuilt to include
+  the password functions; copy it over too).
+
+- **Project owners: the rules changed again, so publish `firestore.rules` once more** (Firestore > Rules > paste > Publish).
+  Until you do, owners will see "Missing or insufficient permissions" on My projects. No new index is needed.
+- After publishing, sign in as a Team Leader, Manager or the Director, open **Teams & projects**, edit a project and choose
+  its **Project owner** (any person, in any team). The owner then gets **My projects** and a Project view in **Reports**.
+  Older projects have no owner until you set one.
+- Recommended: run `npm run test:rules` on your Mac (it checks the owner rules, including the exact queries the app runs).
 
 - The rules changed: publish them again, otherwise Leave and Calendar will say "Your role does not allow that action".
 - One new index is used (leaves by team and end date). It is in `firestore.indexes.json`.
+- New: Reports page (Assistant Team Leader and above). It uses the same rules and indexes as Calendar and Team overview, so
+  nothing new needs publishing. Optional: if your financial year does not start in January, add `fiscalYearStartMonth: 4`
+  (for April, for example) to `appSettings` so quarters and "year" follow it.
 - New: public holidays for Malaysia. After the new files are on GitHub, sign in as the Director, open **Leave**, press
   **Add Malaysian holidays**, keep the years ticked and press **Add**. No rules change is needed for this.
 - Optional settings in `js/config.js`, inside `appSettings` (the app works without them):
@@ -128,7 +145,8 @@ export const appSettings = {
   appName: 'Planner',
   organisation: 'SMM Education Group',
   weekendDays: [0, 6],   // 0 = Sunday ... 6 = Saturday. Use [5, 6] for Friday and Saturday weekends.
-  weekStartsOn: 1        // 1 = Monday, 0 = Sunday
+  weekStartsOn: 1,       // 1 = Monday, 0 = Sunday
+  fiscalYearStartMonth: 1 // 1 = January. Use 4 if your financial year starts in April (affects Reports)
 };
 ```
 

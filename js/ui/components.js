@@ -19,6 +19,11 @@ export function toast(message, kind = 'info') {
 
 export function errorMessage(err) {
   const code = err && err.code ? String(err.code) : '';
+  if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') return 'Your current password is not correct.';
+  if (code === 'auth/weak-password') return 'That password is too weak. Please choose a longer one.';
+  if (code === 'auth/too-many-requests') return 'Too many attempts. Please wait a few minutes and try again.';
+  if (code === 'auth/requires-recent-login') return 'For your safety, please sign out, sign in again, and then change your password.';
+  if (code === 'auth/network-request-failed') return 'No internet connection. Please try again.';
   if (code === 'permission-denied') return 'Your role does not allow that action.';
   if (code === 'unavailable') return 'No connection to Firebase right now. Please try again.';
   if (code === 'resource-exhausted') return 'The free daily Firebase limit has been reached. It resets daily. Please try again tomorrow.';
