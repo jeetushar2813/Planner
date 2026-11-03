@@ -11,7 +11,7 @@
 // sample data that lives only in your browser, so you can try every screen first.
 // ---------------------------------------------------------------------------
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyDOAr_wiDXIgteL_1gEwkW1gvhQu48ORqk",
   authDomain: "planner-600b6.firebaseapp.com",
   projectId: "planner-600b6",
