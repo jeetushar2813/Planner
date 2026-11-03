@@ -1,0 +1,17 @@
+{
+  "name": "team-planner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Team task and productivity manager. Static web app on GitHub Pages with Firebase (Auth + Firestore).",
+  "type": "module",
+  "scripts": {
+    "build:vendor": "node tools/build-vendor.mjs",
+    "serve": "node tools/serve.mjs",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-planner \"node --test tests/rules.test.mjs\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "esbuild": "^0.25.0",
+    "firebase": "^12.19.0"
+  }
+}

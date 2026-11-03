@@ -1,0 +1,26 @@
+{
+  "indexes": [
+    { "collectionGroup": "tasks", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "teamId", "order": "ASCENDING" },
+      { "fieldPath": "statusCategory", "order": "ASCENDING" },
+      { "fieldPath": "completedDate", "order": "ASCENDING" } ] },
+    { "collectionGroup": "tasks", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "ownerId", "order": "ASCENDING" },
+      { "fieldPath": "statusCategory", "order": "ASCENDING" },
+      { "fieldPath": "completedDate", "order": "ASCENDING" } ] },
+    { "collectionGroup": "tasks", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "statusCategory", "order": "ASCENDING" },
+      { "fieldPath": "completedDate", "order": "ASCENDING" } ] },
+    { "collectionGroup": "activityLog", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "teamId", "order": "ASCENDING" },
+      { "fieldPath": "ts", "order": "DESCENDING" } ] },
+    { "collectionGroup": "activityLog", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "actorId", "order": "ASCENDING" },
+      { "fieldPath": "ts", "order": "DESCENDING" } ] },
+    { "collectionGroup": "activityLog", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "teamId", "order": "ASCENDING" },
+      { "fieldPath": "actorId", "order": "ASCENDING" },
+      { "fieldPath": "ts", "order": "DESCENDING" } ] }
+  ],
+  "fieldOverrides": []
+}

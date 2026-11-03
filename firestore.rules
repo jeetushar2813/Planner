@@ -1,0 +1,387 @@
+rules_version = '2';
+
+// Team Planner security rules.
+//
+// These rules are the real protection for your data. The buttons hidden in the
+// web page are only a convenience, because anyone can open the browser tools and
+// try to bypass them. Every permission in the table in the planning document is
+// enforced here.
+//
+// Roles (stored in users/{uid}.role): director, manager, leader, asst_leader, member
+// Scope: a person's teams are stored in users/{uid}.teamIds. Everyone except the
+// Director only sees and changes work for teams listed there.
+//
+// Accountability: every write to a task, comment, user, team, project or status
+// must come in the SAME batch as a matching entry in activityLog, and log entries
+// can never be edited or deleted.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------- helpers
+
+    function meDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function me() { return meDoc().data; }
+
+    // Signed in, has a user record, and that record is active. A person whose
+    // account was deactivated is locked out of everything.
+    function active() {
+      return request.auth != null && meDoc().data.active == true;
+    }
+    function role() { return me().role; }
+
+    function isDirector()   { return active() && role() == 'director'; }
+    function isLeaderUp()   { return active() && role() in ['director', 'manager', 'leader']; }
+    function inTeam(teamId) { return active() && teamId in me().teamIds; }
+    function inScope(teamId) { return isDirector() || inTeam(teamId); }
+
+    function logPath(logId) {
+      return /databases/$(database)/documents/activityLog/$(logId);
+    }
+
+    // True only if a log entry written in this same batch names this person,
+    // this kind of item, this item, and carries this request's server time.
+    function logged(type, entityId, logId) {
+      return logId is string
+        && getAfter(logPath(logId)).data.actorId == request.auth.uid
+        && getAfter(logPath(logId)).data.entityType == type
+        && getAfter(logPath(logId)).data.entityId == entityId
+        && getAfter(logPath(logId)).data.ts == request.time;
+    }
+
+    function categoryOf(statusId) {
+      return get(/databases/$(database)/documents/statuses/$(statusId)).data.category;
+    }
+
+    // ------------------------------------------------------------------ tasks
+
+    match /tasks/{taskId} {
+
+      function validShape(d) {
+        return d.keys().hasAll([
+            'title', 'description', 'teamId', 'projectId', 'ownerId', 'createdBy',
+            'status', 'statusCategory', 'statusNote', 'priority', 'startDate',
+            'dueDate', 'estimateHours', 'checklist', 'archived', 'completedAt',
+            'completedDate', 'submits', 'reworks', 'createdAt', 'updatedAt', 'lastLogId'
+          ])
+          && d.title is string && d.title.size() > 0 && d.title.size() <= 200
+          && d.description is string && d.description.size() <= 5000
+          && d.teamId is string
+          && (d.projectId == null || d.projectId is string)
+          && d.ownerId is string
+          && d.status is string
+          && d.statusCategory in ['todo', 'active', 'review', 'paused', 'done', 'closed']
+          && d.statusCategory == categoryOf(d.status)
+          && (d.statusNote == null || (d.statusNote is string && d.statusNote.size() <= 500))
+          && d.priority in ['low', 'medium', 'high', 'urgent']
+          && (d.startDate == null || (d.startDate is string && d.startDate.size() == 10))
+          && (d.dueDate == null || (d.dueDate is string && d.dueDate.size() == 10))
+          && (d.estimateHours == null || (d.estimateHours is number && d.estimateHours >= 0))
+          && d.checklist is list && d.checklist.size() <= 60
+          && d.archived is bool
+          && d.submits is number && d.reworks is number;
+      }
+
+      // The owner must belong to the task's team.
+      function ownerInTeam(d) {
+        return d.teamId in get(/databases/$(database)/documents/users/$(d.ownerId)).data.teamIds;
+      }
+
+      // Completed date is stamped by the server when a task reaches a Done status,
+      // and cleared again if the task is reopened.
+      function completionOk(b, a) {
+        return a.statusCategory == 'done'
+          ? (b.statusCategory == 'done'
+              ? a.completedAt == b.completedAt
+              : a.completedAt == request.time)
+          : a.completedAt == null;
+      }
+
+      // A team can switch the approval gate off, so members may mark their own
+      // tasks Completed. By default (gate on) only leaders can approve.
+      function gateOff(teamId) {
+        return get(/databases/$(database)/documents/teams/$(teamId)).data.approvalGate == false;
+      }
+
+      function changedKeys() {
+        return request.resource.data.diff(resource.data).affectedKeys();
+      }
+
+      function memberMayUpdate(b, a) {
+        return b.ownerId == request.auth.uid
+          && inTeam(b.teamId)
+          && !(b.statusCategory in ['done', 'closed'])
+          && changedKeys().hasOnly([
+              'status', 'statusCategory', 'statusNote', 'checklist', 'completedAt',
+              'completedDate', 'submits', 'reworks', 'updatedAt', 'lastLogId'
+            ])
+          && (a.statusCategory in ['todo', 'active', 'review', 'paused']
+              || (a.statusCategory == 'done' && gateOff(b.teamId)));
+      }
+
+      function canUpdate(b, a) {
+        return isDirector()
+          // Manager and Team Leader: everything inside their own team(s).
+          || (role() in ['manager', 'leader']
+              && inTeam(b.teamId) && inTeam(a.teamId)
+              && (a.ownerId == b.ownerId || ownerInTeam(a)))
+          // Assistant Team Leader: same, except deadlines and archiving.
+          || (role() == 'asst_leader'
+              && inTeam(b.teamId) && a.teamId == b.teamId
+              && a.dueDate == b.dueDate && a.archived == b.archived
+              && (a.ownerId == b.ownerId || ownerInTeam(a)))
+          // Team Member: only status, checklist and progress on their own task.
+          || (role() == 'member' && memberMayUpdate(b, a));
+      }
+
+      function canCreate(d) {
+        return isDirector()
+          || (role() in ['manager', 'leader', 'asst_leader']
+              && inTeam(d.teamId) && ownerInTeam(d))
+          || (role() == 'member'
+              && d.ownerId == request.auth.uid && inTeam(d.teamId)
+              && d.statusCategory in ['todo', 'active']);
+      }
+
+      // Read: your own tasks, and tasks of your own team(s). Directors read all.
+      allow get, list: if active()
+        && (isDirector()
+            || resource.data.ownerId == request.auth.uid
+            || inTeam(resource.data.teamId));
+
+      allow create: if active()
+        && validShape(request.resource.data)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.archived == false
+        && request.resource.data.completedAt == null
+        && request.resource.data.statusCategory in ['todo', 'active', 'review', 'paused']
+        && canCreate(request.resource.data)
+        && logged('task', taskId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validShape(request.resource.data)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && completionOk(resource.data, request.resource.data)
+        && canUpdate(resource.data, request.resource.data)
+        && logged('task', taskId, request.resource.data.lastLogId);
+
+      // Tasks are never deleted. Leaders archive them instead, and that is logged.
+      allow delete: if false;
+
+      // --------------------------------------------------------- comments
+
+      match /comments/{commentId} {
+        function parentTask() {
+          return get(/databases/$(database)/documents/tasks/$(taskId)).data;
+        }
+        function canSeeParent() {
+          return isDirector()
+            || parentTask().ownerId == request.auth.uid
+            || inTeam(parentTask().teamId);
+        }
+
+        allow get, list: if active() && canSeeParent();
+
+        allow create: if active() && canSeeParent()
+          && request.resource.data.keys().hasOnly(
+               ['authorId', 'authorName', 'text', 'createdAt', 'logId'])
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000
+          && request.resource.data.createdAt == request.time
+          && logged('comment', commentId, request.resource.data.logId);
+
+        // Comments are permanent so the discussion stays trustworthy.
+        allow update, delete: if false;
+      }
+    }
+
+    // ------------------------------------------------------------------ users
+
+    match /users/{userId} {
+
+      function validUser(d) {
+        return d.keys().hasAll([
+            'name', 'email', 'role', 'teamIds', 'active',
+            'createdAt', 'lastLoginAt', 'lastLogId'
+          ])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+          && d.email is string && d.email.size() <= 200
+          && d.role in ['director', 'manager', 'leader', 'asst_leader', 'member']
+          && d.teamIds is list && d.teamIds.size() <= 20
+          && d.active is bool;
+      }
+
+      function changedUserKeys() {
+        return request.resource.data.diff(resource.data).affectedKeys();
+      }
+
+      // Everyone signed in can read the staff list, because names are needed
+      // next to tasks. It holds no passwords.
+      allow get, list: if active();
+
+      // Only the Director creates accounts and sets roles.
+      allow create: if isDirector()
+        && validUser(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && logged('user', userId, request.resource.data.lastLogId);
+
+      allow update: if
+        (isDirector()
+          && validUser(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.lastLogId != resource.data.lastLogId
+          // The Director cannot lock themselves out by changing their own role or status.
+          && (userId != request.auth.uid
+              || (request.resource.data.role == resource.data.role
+                  && request.resource.data.active == resource.data.active))
+          && logged('user', userId, request.resource.data.lastLogId))
+        ||
+        // Everyone else may only record their own sign-in.
+        (active()
+          && request.auth.uid == userId
+          && changedUserKeys().hasOnly(['lastLoginAt', 'lastLogId'])
+          && request.resource.data.lastLoginAt == request.time
+          && request.resource.data.lastLogId != resource.data.lastLogId
+          && logged('user', userId, request.resource.data.lastLogId));
+
+      // Accounts are deactivated, never deleted, so history stays attached to a name.
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------ teams
+
+    match /teams/{teamId} {
+
+      function validTeam(d) {
+        return d.keys().hasAll(['name', 'approvalGate', 'active', 'createdAt', 'lastLogId'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 80
+          && d.approvalGate is bool
+          && d.active is bool;
+      }
+
+      allow get, list: if active();
+
+      allow create: if isDirector()
+        && validTeam(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && logged('team', teamId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validTeam(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && (isDirector()
+            || (role() == 'manager' && inTeam(teamId)
+                && request.resource.data.diff(resource.data).affectedKeys()
+                     .hasOnly(['name', 'lastLogId'])))
+        && logged('team', teamId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------- projects
+
+    match /projects/{projectId} {
+
+      function validProject(d) {
+        return d.keys().hasAll(
+            ['name', 'teamId', 'description', 'active', 'createdAt', 'lastLogId'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+          && d.teamId is string
+          && d.description is string && d.description.size() <= 1000
+          && d.active is bool;
+      }
+
+      allow get, list: if active();
+
+      allow create: if isLeaderUp()
+        && inScope(request.resource.data.teamId)
+        && validProject(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && logged('project', projectId, request.resource.data.lastLogId);
+
+      allow update: if isLeaderUp()
+        && inScope(resource.data.teamId)
+        && inScope(request.resource.data.teamId)
+        && validProject(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && logged('project', projectId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------- statuses
+
+    match /statuses/{statusId} {
+
+      function validStatus(d) {
+        return d.keys().hasAll(
+            ['name', 'category', 'color', 'order', 'active', 'needsReason', 'lastLogId'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 60
+          && d.category in ['todo', 'active', 'review', 'paused', 'done', 'closed']
+          && d.color is string && d.color.size() <= 9
+          && d.order is number
+          && d.active is bool
+          && d.needsReason is bool;
+      }
+
+      allow get, list: if active();
+
+      // Only the Director customises the list of statuses.
+      allow create: if isDirector()
+        && validStatus(request.resource.data)
+        && logged('status', statusId, request.resource.data.lastLogId);
+
+      allow update: if isDirector()
+        && validStatus(request.resource.data)
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && logged('status', statusId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------ activity log
+
+    match /activityLog/{logId} {
+
+      function validLog(d) {
+        return d.keys().hasAll([
+            'ts', 'actorId', 'actorName', 'actorRole', 'action', 'entityType',
+            'entityId', 'entityTitle', 'teamId', 'changes', 'summary'
+          ])
+          && d.ts == request.time
+          && d.actorId == request.auth.uid
+          && d.actorRole == role()
+          && d.action is string && d.action.size() <= 40
+          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status']
+          && d.entityId is string
+          && d.entityTitle is string && d.entityTitle.size() <= 300
+          && (d.teamId == null || d.teamId is string)
+          && d.changes is list && d.changes.size() <= 40
+          && d.summary is string && d.summary.size() <= 600;
+      }
+
+      // The Director reads everything. Managers and Team Leaders read their own
+      // team(s). Everyone else reads only their own activity.
+      allow get, list: if active()
+        && (isDirector()
+            || resource.data.actorId == request.auth.uid
+            || (role() in ['manager', 'leader'] && inTeam(resource.data.teamId)));
+
+      allow create: if active() && validLog(request.resource.data);
+
+      // Nobody, including the Director, can edit or delete a log entry.
+      allow update, delete: if false;
+    }
+  }
+}
