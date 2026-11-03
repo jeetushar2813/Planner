@@ -10,12 +10,13 @@
 import { firebaseConfig } from '../config.js';
 import {
   INITIAL_STATUS_ID, OPEN_CATEGORIES, REFDATA_TTL_MINUTES, DEFAULT_STATUSES,
-  PRIORITY_LABEL, ROLE_LABEL, LEAVE_TYPES, LEAVE_TYPE_LABEL, LEAVE_STATUS_LABEL, HALF_LABEL
+  PRIORITY_LABEL, ROLE_LABEL, LEAVE_TYPES, LEAVE_TYPE_LABEL, LEAVE_STATUS_LABEL, HALF_LABEL, ENTITLED_TYPES
 } from './model.js';
 import { diffFields, summarize, taskAction } from './log.js';
 import { todayISO, toDate } from './util.js';
 import * as perm from './perm.js';
 import { deriveStepFields, cleanSteps, dropOutsiders } from './steps.js';
+import { groupLeaves, buildPolicy } from './entitlement.js';
 import { applyTheme, isTheme } from './theme.js';
 
 let backend = null;
@@ -557,7 +558,7 @@ export async function addComment(task, text) {
 
 // ----------------------------------------------------------------------- people
 
-export async function createPerson({ name, email, role, teamIds, password, sendReset, superuser = false }) {
+export async function createPerson({ name, email, role, teamIds, password, sendReset, superuser = false, hr = false }) {
   if (!name.trim()) throw new Error('Please enter a name.');
   if (!/^\S+@\S+\.\S+$/.test(email)) throw new Error('Please enter a valid email address.');
   if (!password || password.length < 8) throw new Error('The temporary password needs at least 8 characters.');
@@ -571,12 +572,14 @@ export async function createPerson({ name, email, role, teamIds, password, sendR
     changes: [
       { field: 'role', from: '', to: ROLE_LABEL[role] },
       { field: 'teamIds', from: '', to: teamIds.map(teamName).join(', ') },
-      ...(superuser ? [{ field: 'superuser', from: '', to: 'yes' }] : [])
+      ...(superuser ? [{ field: 'superuser', from: '', to: 'yes' }] : []),
+      ...(hr ? [{ field: 'hr', from: '', to: 'yes' }] : [])
     ]
   });
   const doc = {
     name: name.trim(), email: email.trim(), role, teamIds, active: true,
     ...(superuser ? { superuser: true } : {}),
+    ...(hr ? { hr: true } : {}),
     createdAt: backend.ts(), lastLoginAt: null, lastLogId: log.id
   };
   try {
@@ -595,16 +598,17 @@ export async function createPerson({ name, email, role, teamIds, password, sendR
 export const keepsFullPower = (u) => u.role === 'director' || u.superuser === true;
 
 export async function updatePerson(user, patch) {
-  const before = { ...user, superuser: user.superuser === true };
+  const before = { ...user, superuser: user.superuser === true, hr: user.hr === true };
   const next = { ...before, ...patch };
   if (patch.superuser !== undefined) next.superuser = patch.superuser === true;
+  if (patch.hr !== undefined) next.hr = patch.hr === true;
   if (user.id === state.user.id) {
     if (next.active === false) throw new Error('You cannot deactivate your own account.');
     if (!keepsFullPower(next)) {
       throw new Error('That would remove your own admin powers. Tick "Superuser access" first, or ask another Director or Superuser to change your role.');
     }
   }
-  const changes = diffFields(before, next, ['name', 'role', 'teamIds', 'active', 'superuser'], resolveForLog);
+  const changes = diffFields(before, next, ['name', 'role', 'teamIds', 'active', 'superuser', 'hr'], resolveForLog);
   if (!changes.length) return;
   const log = makeLog({
     action: 'user.update', entityType: 'user', entityId: user.id, entityTitle: next.name,
@@ -738,7 +742,7 @@ export async function submitLeave({ person, type, startDate, endDate, half, reas
   const draft = { type, startDate, endDate, half: startDate === endDate ? (half || 'full') : 'full', reason: (reason || '').trim(), teamIds };
   const problem = validateLeaveDraft(draft);
   if (problem) throw new Error(problem);
-  const clash = existing.find((l) => l.userId === person.id && ['pending', 'approved'].includes(l.status)
+  const clash = existing.find((l) => l.userId === person.id && ['pending', 'leader_ok', 'approved'].includes(l.status)
     && teamIds.includes(l.teamId) && l.startDate <= endDate && l.endDate >= startDate);
   if (clash) throw new Error(`${person.name} already has leave from ${rangeText(clash)} (${LEAVE_STATUS_LABEL[clash.status].toLowerCase()}).`);
 
@@ -748,7 +752,13 @@ export async function submitLeave({ person, type, startDate, endDate, half, reas
       if (!perm.canRecordLeaveFor(state.user, person, teamId)) throw new Error('Your role cannot record leave for that person.');
     }
   }
-  const approvedNow = forOthers || perm.isDirector(state.user);
+  // Where the request starts in the approval chain. The Director's own record is final. A
+  // Team Leader or Manager has nobody above them in the team, so their step is done and it goes
+  // to the Director. Everyone else starts with their Team Leader.
+  const me = state.user;
+  const start = perm.isDirector(me) ? 'approved' : (me.role === 'leader' || me.role === 'manager') ? 'leader_ok'
+    : (forOthers ? 'leader_ok' : 'pending');
+  const approvedNow = start === 'approved';
   const stamp = backend.ts();
   const ops = [];
   const created = [];
@@ -757,13 +767,14 @@ export async function submitLeave({ person, type, startDate, endDate, half, reas
     const doc = {
       userId: person.id, userName: person.name, teamId,
       type: draft.type, startDate, endDate, half: draft.half, reason: draft.reason,
-      status: approvedNow ? 'approved' : 'pending',
+      status: start,
       requestedBy: state.user.id,
       decidedBy: approvedNow ? state.user.id : null, decidedAt: approvedNow ? stamp : null, decisionNote: null,
+      ...(start === 'leader_ok' ? { leaderBy: state.user.id, leaderAt: stamp } : {}),
       createdAt: stamp, updatedAt: stamp, lastLogId: ''
     };
     const log = makeLog({
-      action: approvedNow ? 'leave.record' : 'leave.request', entityType: 'leave', entityId: id,
+      action: forOthers ? 'leave.record' : (approvedNow ? 'leave.record' : 'leave.request'), entityType: 'leave', entityId: id,
       entityTitle: leaveTitle(doc), teamId,
       changes: [
         { field: 'type', from: '', to: LEAVE_TYPE_LABEL[draft.type] },
@@ -776,33 +787,38 @@ export async function submitLeave({ person, type, startDate, endDate, half, reas
     doc.lastLogId = log.id;
     ops.push({ type: 'set', path: 'leaves/' + id, data: doc }, log.op);
     const now = new Date();
-    created.push({ id, ...doc, createdAt: now, updatedAt: now, decidedAt: approvedNow ? now : null });
+    created.push({ id, ...doc, createdAt: now, updatedAt: now, decidedAt: approvedNow ? now : null, leaderAt: start === 'leader_ok' ? now : undefined });
   }
   await backend.commit(ops);
   emit('leave');
   return created;
 }
 
+// Step 1 (Team Leader) moves a request to "waiting for the Director"; step 2 (Director) approves it.
+// Either can decline, with a reason.
 export async function decideLeave(leave, decision, note) {
   const approve = decision === 'approve';
   const text = (note || '').trim();
   if (!approve && !text) throw new Error('Please give a short reason for declining.');
   if (!perm.canApproveLeave(state.user, leave)) throw new Error('Your role cannot decide on this leave.');
   const stamp = backend.ts();
-  const status = approve ? 'approved' : 'declined';
+  const stepOne = approve && leave.status === 'pending';
+  const status = !approve ? 'declined' : stepOne ? 'leader_ok' : 'approved';
   const log = makeLog({
-    action: approve ? 'leave.approve' : 'leave.decline', entityType: 'leave', entityId: leave.id,
+    action: !approve ? 'leave.decline' : stepOne ? 'leave.leader' : 'leave.approve', entityType: 'leave', entityId: leave.id,
     entityTitle: leaveTitle(leave), teamId: leave.teamId,
     changes: [
       { field: 'status', from: LEAVE_STATUS_LABEL[leave.status], to: LEAVE_STATUS_LABEL[status] },
       ...(text ? [{ field: 'decisionNote', from: '', to: text.slice(0, 120) }] : [])
     ]
   });
-  const patch = { status, decidedBy: state.user.id, decidedAt: stamp, decisionNote: text || null, updatedAt: stamp, lastLogId: log.id };
+  const patch = stepOne
+    ? { status, leaderBy: state.user.id, leaderAt: stamp, updatedAt: stamp, lastLogId: log.id }
+    : { status, decidedBy: state.user.id, decidedAt: stamp, decisionNote: text || null, updatedAt: stamp, lastLogId: log.id };
   await backend.commit([{ type: 'update', path: 'leaves/' + leave.id, data: patch }, log.op]);
   emit('leave');
   const now = new Date();
-  return { ...leave, ...patch, decidedAt: now, updatedAt: now };
+  return { ...leave, ...patch, ...(stepOne ? { leaderAt: now } : { decidedAt: now }), updatedAt: now };
 }
 
 export async function cancelLeave(leave) {
@@ -830,9 +846,108 @@ export async function loadMyLeave() {
   return docs;
 }
 
+// Requests still waiting on someone: for the Team Leader (pending) and for the Director (leader_ok).
 export async function loadPendingLeave(teamId) {
-  const { docs } = await backend.query('leaves', { where: [['teamId', '==', teamId], ['status', '==', 'pending']] });
-  return docs;
+  const [a, b] = await Promise.all(['pending', 'leader_ok'].map((st) =>
+    backend.query('leaves', { where: [['teamId', '==', teamId], ['status', '==', st]] })));
+  return [...a.docs, ...b.docs];
+}
+
+// ------------------------------------------------------------------- HR: entitlements and acknowledging
+//
+// HR reads every leave record. To keep reads low, one query loads a whole year (leaves that end in
+// that year or in the month after), the result is kept for 5 minutes, and the To-acknowledge badge
+// in the menu uses the same data.
+
+export async function loadLeaveYear(year) {
+  const { docs } = await backend.query('leaves', { where: [['endDate', '>=', `${year}-01-01`], ['endDate', '<=', `${Number(year) + 1}-01-31`]] });
+  return docs.filter((l) => l.startDate <= `${year}-12-31`);
+}
+
+const policyCache = new Map();
+export async function loadPolicy(year, { force = false } = {}) {
+  const key = String(year);
+  if (!force && policyCache.has(key)) return policyCache.get(key);
+  const doc = await backend.getDoc('leavePolicy/' + key);
+  policyCache.set(key, doc);
+  return doc;
+}
+
+const FIELD_DAYS = (t) => LEAVE_TYPE_LABEL[t] || t;
+export async function savePolicy(year, days, overrides) {
+  if (!perm.canSetEntitlements(state.user)) throw new Error('Only HR can set leave entitlements.');
+  const before = await loadPolicy(year, { force: true });
+  const next = buildPolicy(year, days, overrides);
+  const changes = [];
+  for (const t of ENTITLED_TYPES) {
+    const a = before?.days?.[t], b = next.days[t];
+    if (a !== b) changes.push({ field: t, from: a === undefined ? '' : String(a), to: b === undefined ? 'not set' : String(b) });
+  }
+  // One line for each person whose exception was added, changed or removed.
+  const describe = (o) => (o ? ENTITLED_TYPES.filter((t) => typeof o[t] === 'number').map((t) => `${LEAVE_TYPE_LABEL[t]} ${o[t]}`).join(', ') : '');
+  const ids = [...new Set([...Object.keys(before?.overrides || {}), ...Object.keys(next.overrides)])];
+  for (const id of ids) {
+    const was = describe(before?.overrides?.[id]), now = describe(next.overrides[id]);
+    if (was !== now) changes.push({ field: `Exception: ${userName(id)}`, from: was, to: now || 'removed' });
+  }
+  changes.splice(30);
+  if (!changes.length) return null;
+  const log = makeLog({
+    action: 'policy.update', entityType: 'policy', entityId: String(year),
+    entityTitle: `Leave entitlements ${year}`, teamId: null, changes
+  });
+  const stamp = backend.ts();
+  const doc = { ...next, updatedAt: stamp, lastLogId: log.id };
+  await backend.commit([{ type: 'set', path: 'leavePolicy/' + year, data: doc }, log.op]);
+  policyCache.delete(String(year));
+  emit('policy');
+  return { id: String(year), ...doc, updatedAt: new Date() };
+}
+export const entitlementLabel = FIELD_DAYS;
+
+// HR acknowledges approved leave. A request that was stored once per team is acknowledged in one go.
+// Nothing about the approval changes. Chunks of 8 stay inside the rules' document-access limit.
+export async function acknowledgeLeave(groups) {
+  if (!perm.isHr(state.user)) throw new Error('Only HR can acknowledge leave.');
+  const docs = groups.flatMap((g) => g.docs.filter((d) => d.status === 'approved' && !d.hrAckBy));
+  if (!docs.length) return 0;
+  let done = 0;
+  for (let i = 0; i < docs.length; i += 8) {
+    const chunk = docs.slice(i, i + 8);
+    const stamp = backend.ts();
+    const ops = [];
+    for (const l of chunk) {
+      const log = makeLog({
+        action: 'leave.ack', entityType: 'leave', entityId: l.id, entityTitle: leaveTitle(l), teamId: l.teamId,
+        changes: [{ field: 'hrAck', from: '', to: 'acknowledged' }]
+      });
+      ops.push({ type: 'update', path: 'leaves/' + l.id, data: { hrAckBy: state.user.id, hrAckAt: stamp, updatedAt: stamp, lastLogId: log.id } }, log.op);
+    }
+    await backend.commit(ops);
+    done += chunk.length;
+    const now = new Date();
+    for (const l of chunk) { l.hrAckBy = state.user.id; l.hrAckAt = now; }
+  }
+  emit('leave');
+  return done;
+}
+
+// Number shown on the HR menu entry: approved leave nobody in HR has acknowledged yet (this year).
+export const hrQueue = { count: 0, at: 0, leaves: null, year: null };
+const thisYearNumber = () => Number(todayISO().slice(0, 4));
+// Keeps the menu badge in step with a year of leave that a screen has just loaded or changed.
+export function syncHrQueue(leaves, year) {
+  if (year !== thisYearNumber()) return;
+  hrQueue.leaves = leaves; hrQueue.year = year; hrQueue.at = Date.now();
+  hrQueue.count = groupLeaves(leaves).filter((g) => g.waitingForHr).length;
+  emit('hr');
+}
+export async function refreshHrQueue({ force = false } = {}) {
+  if (!perm.isHr(state.user)) return 0;
+  const year = thisYearNumber();
+  if (!force && hrQueue.leaves && hrQueue.year === year && Date.now() - hrQueue.at < 5 * 60000) return hrQueue.count;
+  syncHrQueue(await loadLeaveYear(year), year);
+  return hrQueue.count;
 }
 
 // ---------------------------------------------------------------------- holidays

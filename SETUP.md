@@ -117,6 +117,32 @@ Each new version changes some files. To update:
 
 ### This version (Calendar, Leave, Team overview, Reports, Project owners, My profile and themes)
 
+- **HR role, yearly leave entitlements and the two-step leave approval: the rules changed, so publish `firestore.rules` again**
+  (Firestore > Rules > paste > Publish) **before** you use any of this. Until you do, approving leave, acknowledging leave and
+  saving entitlements are refused with "Missing or insufficient permissions". No new index is needed.
+- **Make someone HR (one time):** sign in as the Director or a Superuser, open **People**, press **Edit** on the HR person and
+  tick **HR access**, then **Save changes**. HR is a switch like Superuser: the person keeps their role and team (put them in a
+  normal "HR" team, and they can still be a Team Leader or anything else). Not even a Director gets the HR powers without the tick,
+  and only a Director or Superuser can give it. HR people see an **HR leave** page in the menu with a badge for leave waiting to
+  be acknowledged.
+- **Set the yearly entitlements:** HR opens **HR leave > Entitlements**, picks the year and types the days for annual, medical
+  (sick), hospitalization, compassionate and marriage leave. The company-wide table applies to everyone; "Exceptions" lets HR give one
+  person different days. "Copy from last year" saves retyping. Training and Other leave are not counted. People then see their own
+  balance on the Leave page: entitled, taken (approved), waiting and remaining, counting working days only (weekends and public
+  holidays are excluded).
+- **How leave is approved now:** a request goes to the **Team Leader first** (status "Waiting for Director" afterwards), then the
+  **Director**. When both have approved, the leave is approved and counts everywhere. A Director who approves a request that is
+  still waiting for the Team Leader counts only as that first step; the second approval is separate. A Team Leader's or Manager's
+  own request skips the first step; a Director's own record is approved at once. A decline needs a reason and ends the request.
+- **HR acknowledgement never blocks anything:** leave is already approved once the Team Leader and Director approve. HR only
+  sees it under **HR leave > To acknowledge** and presses Acknowledge (or Acknowledge all), after which it shows who acknowledged and when.
+  HR can see every approved leave in all teams (read-only) and a balance table for everyone.
+- Things to know: a balance that goes below zero is only a warning, it never stops a request; there is no carry-over or
+  part-year proration; entitlement exceptions are stored in the same yearly record, so any signed-in person's browser can
+  technically read them (the page only shows each person their own).
+- Recommended: run `npm run test:rules` on your Mac. It now also checks the two-step leave chain, HR acknowledgement and the entitlement rules.
+  (I could not run the rules tests in my own environment, so please run them once after publishing and tell me if anything fails.)
+
 - **Superuser, assigning to several people, and checklist steps: the rules changed, so publish `firestore.rules` again**
   (Firestore > Rules > paste > Publish) **before** you use any of this. Until you do, saving a Superuser or a step given to
   someone is refused with "Missing or insufficient permissions". No new index is needed.

@@ -43,7 +43,8 @@ export function renderPeople(container) {
     if (!users.length) { content.append(emptyState('No people yet', 'Add the first person.')); return; }
     const rows = users.map((u) => h('tr', { class: u.active === false ? 'row-muted' : '' },
       h('td', null, h('strong', null, u.name), h('div', { class: 'sub muted' }, u.email)),
-      h('td', null, ROLE_LABEL[u.role] || u.role, u.superuser ? h('span', { class: 'chip chip-super', title: 'Has every power of the Director' }, 'Superuser') : null),
+      h('td', null, ROLE_LABEL[u.role] || u.role, u.superuser ? h('span', { class: 'chip chip-super', title: 'Has every power of the Director' }, 'Superuser') : null,
+        u.hr ? h('span', { class: 'chip chip-hr', title: 'Sets leave entitlements and acknowledges leave' }, 'HR') : null),
       h('td', null, (u.teamIds || []).map(teamName).join(', ') || h('span', { class: 'muted' }, 'None')),
       h('td', null, u.lastLoginAt ? fmtAgo(u.lastLoginAt) : h('span', { class: 'muted' }, 'Never')),
       h('td', null, u.active === false ? h('span', { class: 'chip chip-off' }, 'Deactivated') : h('span', { class: 'chip chip-on' }, 'Active')),
@@ -63,8 +64,8 @@ function openPersonPanel(person, onDone) {
   const isNew = !person;
   const isSelf = person && person.id === state.user.id;
   const draft = isNew
-    ? { name: '', email: '', role: 'member', teamIds: [], password: tempPassword(), sendReset: true, superuser: false }
-    : { name: person.name, email: person.email, role: person.role, teamIds: [...(person.teamIds || [])], active: person.active !== false, superuser: person.superuser === true };
+    ? { name: '', email: '', role: 'member', teamIds: [], password: tempPassword(), sendReset: true, superuser: false, hr: false }
+    : { name: person.name, email: person.email, role: person.role, teamIds: [...(person.teamIds || [])], active: person.active !== false, superuser: person.superuser === true, hr: person.hr === true };
 
   const panel = openPanel({ title: isNew ? 'Add person' : 'Edit person', subtitle: isNew ? 'Creates a login for them.' : person.email });
   const form = h('form', { class: 'task-form', novalidate: true });
@@ -104,6 +105,10 @@ function openPersonPanel(person, onDone) {
           : (draft.role === 'director'
             ? 'A Director already has every power; this matters only if the role is changed later.'
             : 'Keeps the role above (for example Team Leader) for teams and reports, and adds all Director powers. Give it to as few people as you can.')),
+      field('HR access', h('label', { class: 'check' },
+        h('input', { type: 'checkbox', checked: draft.hr, onchange: (e) => { draft.hr = e.target.checked; } }),
+        ' Handles leave for the whole company'),
+        'Sets the yearly leave entitlements, sees everyone\'s leave balance, and acknowledges approved leave. Their role and team stay as they are. Not even a Director has these without this tick.'),
       field('Teams', h('div', { class: 'check-list' }, teamBoxes.length ? teamBoxes : h('p', { class: 'muted' }, 'No teams yet. Create one under Teams & projects first.')),
         draft.role === 'director' ? 'Directors see every team, so no team is needed.' : null),
       isNew ? field('Temporary password',
@@ -157,7 +162,7 @@ function openPersonPanel(person, onDone) {
           const ok = await confirmDialog(`${draft.name || 'This person'} is not in any team, so they will see no team tasks. Continue anyway?`, { confirm: 'Continue' });
           if (!ok) { busy = false; submit.disabled = false; submit.textContent = 'Save changes'; return; }
         }
-        await updatePerson(person, { name: draft.name.trim(), role: draft.role, teamIds: draft.teamIds, active: draft.active, superuser: draft.superuser });
+        await updatePerson(person, { name: draft.name.trim(), role: draft.role, teamIds: draft.teamIds, active: draft.active, superuser: draft.superuser, hr: draft.hr });
         toast('Saved.', 'success');
         panel.close();
       }

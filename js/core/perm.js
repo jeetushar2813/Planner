@@ -10,6 +10,9 @@ export const isDirector = (u) => u?.role === 'director' || isSuperuser(u);
 export const isManager = (u) => u?.role === 'manager';
 export const isLeader = (u) => u?.role === 'leader';
 export const isDeputy = (u) => u?.role === 'asst_leader';
+// HR: a switch on the account (like Superuser). HR keeps their own role and team, and gets the
+// leave powers below. Being a Director does not give them.
+export const isHr = (u) => u?.hr === true;
 export const isMember = (u) => u?.role === 'member' && !isSuperuser(u);
 
 // "Leader and above" in the planning document = Team Leader, Manager, Director.
@@ -143,12 +146,21 @@ export function logScopeLabel(user) {
 // ---- leave
 // Anyone requests leave for themselves. Approving and recording leave for others is for
 // Team Leaders, Managers and the Director (inside their own team; the Director anywhere).
-export const canApproveLeave = (u, leave) =>
-  (isDirector(u) || (isLeaderUp(u) && inTeam(u, leave.teamId))) && (leave.userId !== u.id || isDirector(u));
+// Leave is approved in two steps: the Team Leader (status 'pending'), then the Director
+// (status 'leader_ok'). Then it is approved. HR only acknowledges afterwards.
+export const isPendingLeave = (leave) => leave.status === 'pending' || leave.status === 'leader_ok';
+export const leaveStep = (leave) => (leave.status === 'pending' ? 'leader' : leave.status === 'leader_ok' ? 'director' : null);
+export const canApproveLeave = (u, leave) => {
+  if (leave.status === 'pending') {
+    return (isDirector(u) || (isLeaderUp(u) && inTeam(u, leave.teamId))) && (leave.userId !== u.id || isDirector(u));
+  }
+  if (leave.status === 'leader_ok') return isDirector(u);
+  return false;
+};
 export const canRecordLeaveFor = (u, person, teamId) =>
   isDirector(u) || (isLeaderUp(u) && inTeam(u, teamId) && (person.teamIds || []).includes(teamId));
 export const canCancelLeave = (u, leave) =>
-  leave.status === 'pending' || leave.status === 'approved'
+  leave.status === 'pending' || leave.status === 'leader_ok' || leave.status === 'approved'
     ? (leave.userId === u.id || isDirector(u) || (isLeaderUp(u) && inTeam(u, leave.teamId)))
     : false;
 // Who can see other people's leave: leaders and deputies (inside their teams), the Director everywhere.
@@ -166,3 +178,8 @@ export const canSeeReports = (u) => isDeputyUp(u) || ownsAnyProject(u);
 export const canSeeTeamReports = (u) => isDeputyUp(u);
 // The "My projects" page is for people who own a project, and for leaders who hand work to others.
 export const canSeeProjects = (u) => ownsAnyProject(u) || isDeputyUp(u);
+
+// HR: yearly entitlements, acknowledging approved leave, and every person's balance.
+export const canSeeHr = isHr;
+export const canSetEntitlements = isHr;
+export const canAcknowledgeLeave = (u, leave) => isHr(u) && leave.status === 'approved' && !leave.hrAckBy;

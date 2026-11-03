@@ -2,14 +2,15 @@
 // holidays. Approved leave and holidays feed the Calendar and the Team Overview.
 
 import { h, add, clear, todayISO, fmtDate, fmtAgo, fmtWeekday } from '../core/util.js';
-import { LEAVE_TYPES, LEAVE_TYPE_LABEL, LEAVE_STATUS_LABEL, HALF_LABEL } from '../core/model.js';
+import { LEAVE_TYPES, LEAVE_TYPE_LABEL, LEAVE_STATUS_LABEL, HALF_LABEL, ENTITLED_TYPES } from '../core/model.js';
+import { groupLeaves, personBalance, dayText, yearOf } from '../core/entitlement.js';
 import * as perm from '../core/perm.js';
 import { leaveWorkdays } from '../core/calendar.js';
 import { MY_KL_HOLIDAYS, MY_KL_YEARS, MY_KL_SOURCE } from '../data/holidays-my-kl.js';
 import {
   state, bus, myTeams, teamName, userById, submitLeave, decideLeave, cancelLeave,
   loadMyLeave, loadTeamLeave, loadPendingLeave, loadHolidays, createHoliday, updateHoliday,
-  planHolidayImport, importHolidays
+  planHolidayImport, importHolidays, loadPolicy, userName
 } from '../core/store.js';
 import {
   openPanel, toast, errorMessage, field, select, emptyState, spinner, confirmDialog, promptDialog, avatar
@@ -28,6 +29,8 @@ export function renderLeave(container) {
   const ownTeams = myTeamList.filter((t) => (user.teamIds || []).includes(t.id));
 
   let mine = [], pending = [], teamLeave = [], holidays = [];
+  const policies = {};              // year -> policy document (null when HR has not set one)
+  const thisYear = Number(todayISO().slice(0, 4));
   let teamFilter = '';
   let loading = true;
   let failure = null;
@@ -52,10 +55,11 @@ export function renderLeave(container) {
       const today = todayISO();
       const teamIds = (seesTeam ? myTeamList : []).map((t) => t.id);
       const [m, hol, tl, pd] = await Promise.all([
-        loadMyLeave(), loadHolidays(today),
+        loadMyLeave(), loadHolidays(`${thisYear}-01-01`),
         Promise.all(teamIds.map((id) => loadTeamLeave(id, today))),
         canDecide ? Promise.all(teamIds.map((id) => loadPendingLeave(id))) : Promise.resolve([])
       ]);
+      for (const y of [thisYear, thisYear + 1]) { try { policies[y] = await loadPolicy(y); } catch { policies[y] = null; } }
       mine = m.sort((a, b) => b.startDate.localeCompare(a.startDate));
       holidays = hol;
       teamLeave = dedupe(tl.flat());
@@ -75,6 +79,7 @@ export function renderLeave(container) {
     if (failure) { body.append(emptyState('Could not load leave', errorMessage(failure))); return; }
 
     if (canDecide) body.append(approvalsCard());
+    body.append(balanceCard());
     body.append(myLeaveCard());
     if (seesTeam) body.append(teamLeaveCard());
     body.append(holidayCard());
@@ -82,20 +87,29 @@ export function renderLeave(container) {
 
   // ---------------------------------------------------------------- approvals
   function approvalsCard() {
-    const todo = pending.filter((l) => perm.canApproveLeave(user, l)).sort((a, b) => a.startDate.localeCompare(b.startDate));
+    const todo = pending.filter((l) => perm.canApproveLeave(user, l))
+      .sort((a, b) => (perm.leaveStep(a) === perm.leaveStep(b) ? 0 : perm.leaveStep(a) === 'director' ? -1 : 1) || a.startDate.localeCompare(b.startDate));
     const card = h('section', { class: 'card-block', 'aria-labelledby': 'h-approve' },
-      h('h2', { id: 'h-approve' }, 'Waiting for your decision', h('span', { class: 'count' + (todo.length ? ' count-bad' : '') }, todo.length)));
+      h('h2', { id: 'h-approve' }, 'Waiting for your decision', h('span', { class: 'count' + (todo.length ? ' count-bad' : '') }, todo.length)),
+      h('p', { class: 'muted small' }, 'Leave is approved in two steps: the Team Leader first, then the Director. HR is told afterwards and only acknowledges.'));
     if (!todo.length) { card.append(h('p', { class: 'muted' }, 'No requests are waiting.')); return card; }
     card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tasks' },
-      h('thead', null, h('tr', null, h('th', null, 'Person'), h('th', null, 'Leave'), h('th', null, 'Dates'), h('th', null, 'Reason'), h('th'))),
-      h('tbody', null, todo.map((l) => h('tr', null,
-        h('td', null, h('span', { class: 'person' }, avatar(l.userName, 22), h('span', null, l.userName)), h('div', { class: 'sub muted' }, teamName(l.teamId))),
-        h('td', null, LEAVE_TYPE_LABEL[l.type]),
-        h('td', null, rangeText(l) + halfNote(l), h('div', { class: 'sub muted' }, dayWord(daysOf(l)))),
-        h('td', null, l.reason || h('span', { class: 'muted' }, '–')),
-        h('td', { class: 'row-actions' },
-          h('button', { type: 'button', class: 'btn btn-primary small', onclick: () => decide(l, 'approve') }, 'Approve'),
-          h('button', { type: 'button', class: 'btn btn-ghost small', onclick: () => decide(l, 'decline') }, 'Decline'))))))));
+      h('thead', null, h('tr', null, h('th', null, 'Person'), h('th', null, 'Leave'), h('th', null, 'Dates'), h('th', null, 'Reason'), h('th', null, 'Step'), h('th'))),
+      h('tbody', null, todo.map((l) => {
+        const director = perm.leaveStep(l) === 'director';
+        return h('tr', null,
+          h('td', null, h('span', { class: 'person' }, avatar(l.userName, 22), h('span', null, l.userName)), h('div', { class: 'sub muted' }, teamName(l.teamId))),
+          h('td', null, LEAVE_TYPE_LABEL[l.type]),
+          h('td', null, rangeText(l) + halfNote(l), h('div', { class: 'sub muted' }, dayWord(daysOf(l)))),
+          h('td', null, l.reason || h('span', { class: 'muted' }, '–')),
+          h('td', null, director ? 'Director' : 'Team Leader',
+            director && l.leaderBy ? h('div', { class: 'sub muted' }, `Team Leader: ${userName(l.leaderBy)}`) : null,
+            !director && perm.isDirector(user) && !(user.role === 'leader' || user.role === 'manager')
+              ? h('div', { class: 'sub muted' }, 'Counts as the Team Leader step') : null),
+          h('td', { class: 'row-actions' },
+            h('button', { type: 'button', class: 'btn btn-primary small', onclick: () => decide(l, 'approve') }, director ? 'Approve' : (perm.isDirector(user) ? 'Approve (Team Leader step)' : 'Approve')),
+            h('button', { type: 'button', class: 'btn btn-ghost small', onclick: () => decide(l, 'decline') }, 'Decline')));
+      })))));
     return card;
   }
 
@@ -111,9 +125,34 @@ export function renderLeave(container) {
     }
     try {
       await decideLeave(leave, decision, note);
-      toast(decision === 'approve' ? 'Leave approved.' : 'Leave declined.', 'success');
+      toast(decision !== 'approve' ? 'Leave declined.' : leave.status === 'pending' ? 'Approved. It now waits for the Director.' : 'Leave approved.', 'success');
       load();
     } catch (err) { toast(errorMessage(err), 'error'); }
+  }
+
+  // ------------------------------------------------------------- my balance
+  const balanceFor = (year) => personBalance({ person: user, groups: groupLeaves(mine), policy: policies[year], holidays, year });
+
+  function balanceCard() {
+    const year = thisYear;
+    const card = h('section', { class: 'card-block' }, h('h2', null, `My leave balance ${year}`));
+    if (!policies[year]) {
+      card.append(h('p', { class: 'muted' }, 'HR has not set the leave entitlements for this year yet.'));
+      return card;
+    }
+    const bal = balanceFor(year);
+    const kinds = ENTITLED_TYPES.filter((t) => bal[t].entitled !== null);
+    if (!kinds.length) { card.append(h('p', { class: 'muted' }, 'No leave days have been set for you this year.')); return card; }
+    card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tasks compact' },
+      h('thead', null, h('tr', null, h('th', null, 'Kind of leave'), h('th', { class: 'num' }, 'Entitled'), h('th', { class: 'num' }, 'Taken'), h('th', { class: 'num' }, 'Waiting'), h('th', { class: 'num' }, 'Left'))),
+      h('tbody', null, kinds.map((t) => h('tr', null,
+        h('td', null, LEAVE_TYPE_LABEL[t]),
+        h('td', { class: 'num' }, dayText(bal[t].entitled)),
+        h('td', { class: 'num' }, dayText(bal[t].used)),
+        h('td', { class: 'num' }, dayText(bal[t].pending)),
+        h('td', { class: 'num' }, h('strong', { class: bal[t].left < 0 ? 'neg' : '' }, dayText(bal[t].left)))))))),
+      h('p', { class: 'hint' }, 'Taken = approved. Waiting = asked for but not fully approved yet. Weekends and public holidays are not counted.'));
+    return card;
   }
 
   // ----------------------------------------------------------------- my leave
@@ -131,8 +170,10 @@ export function renderLeave(container) {
         h('td', null, rangeText(l) + halfNote(l), h('div', { class: 'sub muted' }, dayWord(daysOf(l)))),
         h('td', null, teamName(l.teamId)),
         h('td', null, statusChip(l.status),
+          l.leaderBy && l.status !== 'pending' && l.status !== 'declined' ? h('div', { class: 'sub muted' }, `Team Leader: ${userName(l.leaderBy)}`) : null,
           l.status === 'declined' && l.decisionNote ? h('div', { class: 'sub' }, `“${l.decisionNote}”`) : null,
-          l.decidedAt && ['approved', 'declined'].includes(l.status) ? h('div', { class: 'sub muted' }, `${fmtAgo(l.decidedAt)}`) : null),
+          l.decidedAt && ['approved', 'declined'].includes(l.status) ? h('div', { class: 'sub muted' }, `${fmtAgo(l.decidedAt)}`) : null,
+          l.status === 'approved' && l.hrAckAt ? h('div', { class: 'sub muted' }, 'HR acknowledged') : null),
         h('td', { class: 'row-actions' },
           perm.canCancelLeave(user, l) && l.endDate >= today
             ? h('button', { type: 'button', class: 'btn btn-ghost-danger small', onclick: () => cancel(l) }, 'Cancel')
@@ -156,7 +197,7 @@ export function renderLeave(container) {
         { 'aria-label': 'Team', onchange: (e) => { teamFilter = e.target.value; paint(); } })));
     }
     const rows = teamLeave
-      .filter((l) => ['approved', 'pending'].includes(l.status) && (!teamFilter || l.teamId === teamFilter) && l.userId !== user.id)
+      .filter((l) => (l.status === 'approved' || perm.isPendingLeave(l)) && (!teamFilter || l.teamId === teamFilter) && l.userId !== user.id)
       .sort((a, b) => a.startDate.localeCompare(b.startDate));
     if (!rows.length) { card.append(h('p', { class: 'muted' }, 'Nobody has leave booked.')); return card; }
     card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'tasks' },
@@ -179,7 +220,7 @@ export function renderLeave(container) {
         h('div', { class: 'head-actions' },
           perm.isDirector(user) ? h('button', { type: 'button', class: 'btn btn-ghost small', onclick: openMalaysiaPanel }, 'Add Malaysian holidays') : null,
           perm.canManageHolidays(user) ? h('button', { type: 'button', class: 'btn btn-ghost small', onclick: () => openHolidayPanel(null) }, '+ Add holiday') : null)));
-    const list = holidays.filter((x) => x.active !== false);
+    const list = holidays.filter((x) => x.active !== false && x.date >= todayISO());
     if (!list.length) {
       card.append(h('p', { class: 'muted' }, perm.isDirector(user)
         ? 'No upcoming holidays have been added. Use “Add Malaysian holidays” to load the Kuala Lumpur list.'
@@ -305,7 +346,9 @@ export function renderLeave(container) {
 
     const panel = openPanel({
       title: record ? 'Record leave' : 'Request leave',
-      subtitle: record ? 'Recorded leave is approved straight away.' : 'Your Team Leader will approve or decline it.'
+      subtitle: record
+        ? (perm.isDirector(user) ? 'Recorded leave is approved straight away.' : 'Counts as the Team Leader’s approval, then waits for the Director.')
+        : 'Your Team Leader approves first, then the Director. HR is told afterwards.'
     });
     const form = h('form', { class: 'task-form', novalidate: true });
     panel.body.append(form);
@@ -320,6 +363,19 @@ export function renderLeave(container) {
       preview.textContent = n === 0
         ? 'These dates are all weekends or holidays, so no working days are used.'
         : `Uses ${dayWord(n)} of work. Weekends and public holidays are not counted.`;
+      // Your own balance for this kind of leave (a warning only; your approvers decide).
+      const year = yearOf(draft.startDate);
+      if (!record && ENTITLED_TYPES.includes(draft.type)) {
+        if (policies[year] === undefined) { preview.textContent += ' '; }
+        else if (policies[year]) {
+          const b = balanceFor(year)[draft.type];
+          if (b.entitled === null) preview.textContent += ` HR has not set ${LEAVE_TYPE_LABEL[draft.type].toLowerCase()} days for ${year}.`;
+          else {
+            const left = b.left - n;
+            preview.textContent += ` You have ${dayText(b.left)} of ${dayText(b.entitled)} ${LEAVE_TYPE_LABEL[draft.type].toLowerCase()} days left in ${year}${left < 0 ? `. This request goes over by ${dayText(-left)} day${-left === 1 ? '' : 's'}; your approvers will see that.` : `, ${dayText(left)} after this request.`}`;
+          }
+        }
+      }
     }
 
     function draw() {
@@ -335,7 +391,7 @@ export function renderLeave(container) {
         record ? field('Person', select(people.map((u) => ({ value: u.id, label: u.name })), draft.personId, {
           onchange: (e) => { draft.personId = e.target.value; draft.teamIds = teamsFor(personOf()).map((t) => t.id); draw(); }
         })) : null,
-        field('Kind of leave', select(LEAVE_TYPES.map((t) => ({ value: t, label: LEAVE_TYPE_LABEL[t] })), draft.type, { onchange: (e) => { draft.type = e.target.value; } })),
+        field('Kind of leave', select(LEAVE_TYPES.map((t) => ({ value: t, label: LEAVE_TYPE_LABEL[t] })), draft.type, { onchange: (e) => { draft.type = e.target.value; updatePreview(); } })),
         h('div', { class: 'grid-2' },
           field('First day', h('input', { type: 'date', value: draft.startDate, onchange: (e) => {
             draft.startDate = e.target.value;
@@ -364,7 +420,7 @@ export function renderLeave(container) {
           person: personOf(), type: draft.type, startDate: draft.startDate, endDate: draft.endDate,
           half: draft.half, reason: draft.reason, teamIds: draft.teamIds, existing: [...mine, ...teamLeave]
         });
-        toast(record ? 'Leave recorded.' : 'Request sent. Your leader will see it.', 'success');
+        toast(record ? 'Leave recorded.' : 'Request sent. Your Team Leader will see it first.', 'success');
         panel.close(); load();
       } catch (err) { toast(errorMessage(err), 'error'); btn.disabled = false; }
     });

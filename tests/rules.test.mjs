@@ -43,7 +43,11 @@ const USERS = {
   // A Superuser keeps a normal role but has every power of the Director.
   su:     { role: 'leader', teamIds: ['teamA'], superuser: true },
   suGone: { role: 'leader', teamIds: ['teamA'], superuser: true, active: false },
-  notSu:  { role: 'leader', teamIds: ['teamA'], superuser: false }
+  notSu:  { role: 'leader', teamIds: ['teamA'], superuser: false },
+  // HR: a switch on the account. The role and team stay normal.
+  hrM:    { role: 'member', teamIds: ['teamC'], hr: true },
+  hrLdr:  { role: 'leader', teamIds: ['teamC'], hr: true },
+  hrGone: { role: 'member', teamIds: ['teamC'], hr: true, active: false }
 };
 
 const STATUSES = {
@@ -429,19 +433,62 @@ describe('leave', () => {
     await assertFails(createLeave('memA1', 'n5', leaveDoc('memA1', { startDate: '2026-12-05', endDate: '2026-12-01' })));
     await assertFails(createLeave('memA1', 'n6', leaveDoc('memA1', { half: 'am' })));   // half day needs a single day
   });
-  test('a leader records approved leave for someone in their team, not another team', async () => {
-    await assertSucceeds(createLeave('ldrA', 'n7', leaveDoc('memA1', approvedBy('ldrA')), 'teamA'));
-    await assertFails(createLeave('ldrA', 'n8', leaveDoc('memB', approvedBy('ldrA')), 'teamB'));
+  // Leave is approved in two steps. Team Leader: pending -> leader_ok. Director: leader_ok -> approved.
+  const leaderOk = (leader) => ({ status: 'leader_ok', leaderBy: leader, leaderAt: serverTimestamp() });
+  test('a leader records leave for someone in their team (counts as step 1), not another team', async () => {
+    await assertSucceeds(createLeave('ldrA', 'n7', leaveDoc('memA1', { requestedBy: 'ldrA', ...leaderOk('ldrA') }), 'teamA'));
+    await assertFails(createLeave('ldrA', 'n8', leaveDoc('memB', { requestedBy: 'ldrA', ...leaderOk('ldrA') }), 'teamB'));
+  });
+  test('a leader cannot record leave as already approved, only the Director can', async () => {
+    await assertFails(createLeave('ldrA', 'n7b', leaveDoc('memA1', approvedBy('ldrA')), 'teamA'));
+    await assertSucceeds(createLeave('dir', 'n7c', leaveDoc('memA1', approvedBy('dir')), 'teamA'));
+  });
+  test('a leader or manager\'s own request skips step 1; a member\'s cannot', async () => {
+    await assertSucceeds(createLeave('ldrA', 'n7d', leaveDoc('ldrA', { status: 'leader_ok' })));
+    await assertSucceeds(createLeave('mgrA', 'n7e', leaveDoc('mgrA', { status: 'leader_ok' })));
+    await assertFails(createLeave('memA1', 'n7f', leaveDoc('memA1', { status: 'leader_ok' })));
+    await assertFails(createLeave('asstA', 'n7g', leaveDoc('asstA', { status: 'leader_ok' })));
+    await assertFails(createLeave('memA1', 'n7h', leaveDoc('memA1', { status: 'leader_ok', leaderBy: 'ldrA', leaderAt: serverTimestamp() })));   // cannot forge a step
   });
   test('an assistant leader cannot record or approve leave', async () => {
     await assertFails(createLeave('asstA', 'n9', leaveDoc('memA1', approvedBy('asstA')), 'teamA'));
     await seedPending();
     await assertFails(decide('asstA', 'lv1', { status: 'approved', decidedBy: 'asstA', decidedAt: serverTimestamp() }));
   });
-  test('a leader approves a pending request in their team, with their own name and the server time', async () => {
+  test('a leader gives step 1 on a pending request in their team, with their own name and the server time', async () => {
     await seedPending();
-    await assertFails(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'memA2', decidedAt: serverTimestamp() }));
-    await assertSucceeds(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+    await assertFails(decide('ldrA', 'lv1', { status: 'leader_ok', leaderBy: 'memA2', leaderAt: serverTimestamp() }));
+    await assertFails(decide('ldrA', 'lv1', { status: 'leader_ok', leaderBy: 'ldrA', leaderAt: new Date('2020-01-01') }));
+    await assertSucceeds(decide('ldrA', 'lv1', leaderOk('ldrA')));
+  });
+  test('a leader cannot give the final approval, and nobody can skip a step', async () => {
+    await seedPending();
+    await assertFails(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+    await assertFails(decide('dir', 'lv1', { status: 'approved', decidedBy: 'dir', decidedAt: serverTimestamp() }));   // pending -> approved skips the Team Leader
+    await assertSucceeds(decide('ldrA', 'lv1', leaderOk('ldrA')));
+    await assertFails(decide('ldrA', 'lv1', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
+    await assertFails(decide('mgrA', 'lv1', { status: 'approved', decidedBy: 'mgrA', decidedAt: serverTimestamp() }));
+    await assertSucceeds(decide('dir', 'lv1', { status: 'approved', decidedBy: 'dir', decidedAt: serverTimestamp() }));
+  });
+  test('a Superuser can give the final approval', async () => {
+    await seedPending();
+    await assertSucceeds(decide('ldrA', 'lv1', leaderOk('ldrA')));
+    await assertSucceeds(decide('su', 'lv1', { status: 'approved', decidedBy: 'su', decidedAt: serverTimestamp() }));
+  });
+  test('step 1 by a leader of another team, a member or the person themselves is refused', async () => {
+    await seedPending();
+    await assertFails(decide('ldrB', 'lv1', leaderOk('ldrB')));
+    await assertFails(decide('memA2', 'lv1', leaderOk('memA2')));
+    await assertFails(decide('memA1', 'lv1', leaderOk('memA1')));
+    await assertFails(decide('hrM', 'lv1', leaderOk('hrM')));
+  });
+  test('the Director can decline at either step, a leader only at step 1', async () => {
+    await seedPending('lvA'); await seedPending('lvB');
+    const decline = (who) => ({ status: 'declined', decidedBy: who, decidedAt: serverTimestamp(), decisionNote: 'No' });
+    await assertSucceeds(decide('dir', 'lvA', decline('dir')));
+    await assertSucceeds(decide('ldrA', 'lvB', leaderOk('ldrA')));
+    await assertFails(decide('ldrA', 'lvB', decline('ldrA')));            // already past the Team Leader
+    await assertSucceeds(decide('dir', 'lvB', decline('dir')));
   });
   test('declining needs a reason', async () => {
     await seedPending();
@@ -455,10 +502,10 @@ describe('leave', () => {
     await assertFails(decide('ldrB', 'lv1', { ...approve, decidedBy: 'ldrB' }));
     await assertFails(decide('memA1', 'lv1', { ...approve, decidedBy: 'memA1' }));
   });
-  test('a leader cannot approve their own leave, the Director can', async () => {
+  test('a leader cannot give step 1 on their own leave, the Director can', async () => {
     await seedPending('lv2', 'ldrA');
-    await assertFails(decide('ldrA', 'lv2', { status: 'approved', decidedBy: 'ldrA', decidedAt: serverTimestamp() }));
-    await assertSucceeds(decide('dir', 'lv2', { status: 'approved', decidedBy: 'dir', decidedAt: serverTimestamp() }));
+    await assertFails(decide('ldrA', 'lv2', leaderOk('ldrA')));
+    await assertSucceeds(decide('dir', 'lv2', leaderOk('dir')));
   });
   test('the person can cancel their own leave, a colleague cannot', async () => {
     await seedPending();
@@ -483,6 +530,149 @@ describe('leave', () => {
   test('leave is never deleted', async () => {
     await seedPending();
     await assertFails(deleteDoc(doc(as('dir'), 'leaves', 'lv1')));
+  });
+  test('a request waiting for the Director can still be cancelled by the person', async () => {
+    await seedPending();
+    await assertSucceeds(decide('ldrA', 'lv1', leaderOk('ldrA')));
+    await assertSucceeds(decide('memA1', 'lv1', { status: 'cancelled' }));
+  });
+  test('the new kinds of leave are accepted, unknown ones are not', async () => {
+    for (const [i, type] of ['compassionate', 'marriage', 'hospitalization', 'sick'].entries()) {
+      await assertSucceeds(createLeave('memA1', 'k' + i, leaveDoc('memA1', { type })));
+    }
+    await assertFails(createLeave('memA1', 'kx', leaveDoc('memA1', { type: 'holiday' })));
+  });
+});
+
+// -------------------------------------------------------------------- HR
+
+describe('HR', () => {
+  const upd = (uid, target, data) => logged(uid, { path: `users/${target}`, kind: 'update', type: 'user', entityId: target, teamId: null, data });
+  const leaveDoc = (uid, over = {}) => ({
+    userId: uid, userName: uid, teamId: USERS[uid].teamIds[0], type: 'annual', startDate: '2026-12-01', endDate: '2026-12-03',
+    half: 'full', reason: '', status: 'approved', requestedBy: uid, decidedBy: 'dir', decidedAt: new Date(), decisionNote: null,
+    leaderBy: 'ldrA', leaderAt: new Date(), createdAt: new Date(), updatedAt: new Date(), lastLogId: 'seedlog', ...over
+  });
+  const act = (actor, lid, patch, teamId = 'teamA') => logged(actor, {
+    path: `leaves/${lid}`, kind: 'update', type: 'leave', entityId: lid, teamId, data: { updatedAt: serverTimestamp(), ...patch }
+  });
+  const ack = (who) => ({ hrAckBy: who, hrAckAt: serverTimestamp() });
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'leaves', 'ap1'), leaveDoc('memA1'));
+      await setDoc(doc(db, 'leaves', 'ap2'), leaveDoc('memB', { teamId: 'teamB' }));
+      await setDoc(doc(db, 'leaves', 'pend1'), leaveDoc('memA1', { status: 'pending', decidedBy: null, decidedAt: null, leaderBy: null, leaderAt: null }));
+    });
+  });
+
+  test('only a Director or Superuser switches HR on for someone', async () => {
+    await assertSucceeds(upd('dir', 'memA2', { hr: true }));
+    await assertSucceeds(upd('su', 'memA1', { hr: true }));
+    await assertFails(upd('ldrA', 'memA1', { hr: true }));
+    await assertFails(upd('mgrA', 'memA1', { hr: true }));
+    await assertFails(upd('hrM', 'memA1', { hr: true }));              // HR cannot hand out HR either
+  });
+  test('nobody switches HR on for themselves', async () => {
+    await assertFails(upd('memA1', 'memA1', { hr: true }));
+    await assertFails(updateDoc(doc(as('memA1'), 'users', 'memA1'), { hr: true }));
+    await assertFails(updateDoc(doc(as('ldrA'), 'users', 'ldrA'), { hr: true }));
+  });
+  test('HR must be true or false, and a deactivated HR person has nothing', async () => {
+    await assertFails(upd('dir', 'memA2', { hr: 'yes' }));
+    await assertFails(getDocs(collection(as('hrGone'), 'leaves')));
+  });
+
+  test('HR reads every leave record in every team; others do not', async () => {
+    await assertSucceeds(getDocs(collection(as('hrM'), 'leaves')));
+    await assertSucceeds(getDoc(doc(as('hrM'), 'leaves', 'ap1')));
+    await assertSucceeds(getDoc(doc(as('hrLdr'), 'leaves', 'ap2')));
+    await assertSucceeds(getDocs(query(collection(as('hrM'), 'leaves'), where('endDate', '>=', '2026-01-01'), where('endDate', '<=', '2027-01-31'))));
+    await assertFails(getDocs(collection(as('memA2'), 'leaves')));
+    await assertFails(getDocs(collection(as('ldrA'), 'leaves')));
+    await assertFails(getDocs(collection(as('memA1'), 'leaves')));
+  });
+  test('HR acknowledges approved leave, once, naming themselves with the server time', async () => {
+    await assertSucceeds(act('hrM', 'ap1', ack('hrM')));
+    await assertFails(act('hrLdr', 'ap1', ack('hrLdr')));              // already acknowledged
+    await assertSucceeds(act('hrLdr', 'ap2', ack('hrLdr'), 'teamB'));
+  });
+  test('the acknowledgement must be genuine', async () => {
+    await assertFails(act('hrM', 'ap1', { hrAckBy: 'ldrA', hrAckAt: serverTimestamp() }));            // not in someone else\'s name
+    await assertFails(act('hrM', 'ap1', { hrAckBy: 'hrM', hrAckAt: new Date('2020-01-01') }));         // not a made-up time
+  });
+  test('only approved leave can be acknowledged', async () => {
+    await assertFails(act('hrM', 'pend1', ack('hrM')));
+  });
+  test('nobody else acknowledges', async () => {
+    await assertFails(act('dir', 'ap1', ack('dir')));
+    await assertFails(act('ldrA', 'ap1', ack('ldrA')));
+    await assertFails(act('su', 'ap1', ack('su')));
+    await assertFails(act('memA1', 'ap1', ack('memA1')));
+  });
+  test('an acknowledgement changes nothing else', async () => {
+    await assertFails(act('hrM', 'ap1', { ...ack('hrM'), status: 'cancelled' }));
+    await assertFails(act('hrM', 'ap1', { ...ack('hrM'), endDate: '2026-12-31' }));
+    await assertFails(act('hrM', 'ap1', { ...ack('hrM'), decidedBy: 'hrM' }));
+  });
+  test('HR does not approve, decline or cancel anyone\'s leave', async () => {
+    const decline = { status: 'declined', decidedBy: 'hrM', decidedAt: serverTimestamp(), decisionNote: 'No' };
+    await assertFails(act('hrM', 'pend1', { status: 'leader_ok', leaderBy: 'hrM', leaderAt: serverTimestamp() }));
+    await assertFails(act('hrM', 'pend1', decline));
+    await assertFails(act('hrM', 'ap1', { status: 'cancelled' }));
+    await assertFails(act('hrLdr', 'pend1', { status: 'leader_ok', leaderBy: 'hrLdr', leaderAt: serverTimestamp() }, 'teamA'));   // a leader of another team
+  });
+  test('leave stays approved without any acknowledgement', async () => {
+    await assertSucceeds(getDoc(doc(as('memA1'), 'leaves', 'ap1')));
+    await assertSucceeds(act('memA1', 'ap1', { status: 'cancelled' }));   // the person may still cancel, acknowledged or not
+  });
+  test('HR keeps their own role: an HR Team Leader approves only their own team\'s step 1', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'leaves', 'pc'), leaveDoc('memC', { teamId: 'teamC', status: 'pending', decidedBy: null, decidedAt: null, leaderBy: null, leaderAt: null }));
+    });
+    await assertSucceeds(act('hrLdr', 'pc', { status: 'leader_ok', leaderBy: 'hrLdr', leaderAt: serverTimestamp() }, 'teamC'));
+  });
+});
+
+// --------------------------------------------------- leave entitlements
+
+describe('leave entitlements (HR)', () => {
+  const policyDoc = (year = '2026', over = {}) => ({
+    year, days: { annual: 14, sick: 14, hospitalization: 60, compassionate: 3, marriage: 3 }, overrides: { memA1: { annual: 18 } },
+    updatedAt: serverTimestamp(), ...over
+  });
+  const save = (actor, year, data, kind = 'create') => logged(actor, {
+    path: `leavePolicy/${year}`, kind, type: 'policy', entityId: year, teamId: null, data
+  });
+
+  test('HR creates and then updates the entitlements for a year', async () => {
+    await assertSucceeds(save('hrM', '2026', policyDoc()));
+    await assertSucceeds(save('hrLdr', '2026', policyDoc('2026', { days: { annual: 16 } }), 'update'));
+  });
+  test('nobody else writes them: not the Director, a Superuser, a leader or a member', async () => {
+    for (const who of ['dir', 'su', 'ldrA', 'mgrA', 'asstA', 'memA1']) await assertFails(save(who, '2026', policyDoc()));
+  });
+  test('everyone signed in can read them, a deactivated person cannot', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), 'leavePolicy', '2026'), { ...policyDoc(), updatedAt: new Date(), lastLogId: 'seedlog' }); });
+    for (const who of ['memA1', 'ldrA', 'dir', 'hrM']) await assertSucceeds(getDoc(doc(as(who), 'leavePolicy', '2026')));
+    await assertFails(getDoc(doc(as('gone'), 'leavePolicy', '2026')));
+  });
+  test('the numbers are checked', async () => {
+    await assertFails(save('hrM', '2026', policyDoc('2026', { days: { annual: -1 } })));
+    await assertFails(save('hrM', '2026', policyDoc('2026', { days: { annual: 400 } })));
+    await assertFails(save('hrM', '2026', policyDoc('2026', { days: { annual: 'many' } })));
+    await assertFails(save('hrM', '2026', policyDoc('2026', { days: { training: 5 } })));        // only the five counted kinds
+    await assertSucceeds(save('hrM', '2026', policyDoc('2026', { days: { annual: 7.5, sick: 0 } })));
+  });
+  test('the document must be for the year in its id, with a log entry', async () => {
+    await assertFails(save('hrM', '2026', policyDoc('2027')));
+    await assertFails(save('hrM', 'next', policyDoc('next')));
+    await assertFails(save('hrM', '2026', policyDoc('2026', { overrides: 'none' })));
+    await assertFails(setDoc(doc(as('hrM'), 'leavePolicy', '2026'), { ...policyDoc(), lastLogId: 'nolog' }));
+  });
+  test('entitlements are never deleted', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => { await setDoc(doc(ctx.firestore(), 'leavePolicy', '2026'), { ...policyDoc(), updatedAt: new Date(), lastLogId: 'seedlog' }); });
+    await assertFails(deleteDoc(doc(as('hrM'), 'leavePolicy', '2026')));
   });
 });
 

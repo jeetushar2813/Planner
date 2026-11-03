@@ -14,6 +14,7 @@ Start with **SETUP.md**.
 
 - Five roles: Director, Manager, Team Leader, Assistant Team Leader, Team Member, each with a login.
 - Superuser: a switch on a person's account that gives every Director power while their role stays (for example Team Leader). Only a Director or Superuser can switch it on.
+- HR: a switch on a person's account (set by a Director or Superuser). HR sets the yearly leave entitlements (annual, medical, hospitalization, compassionate, marriage) for everyone, with per-person exceptions, sees every approved leave and a balance table, and acknowledges approved leave. Leave is approved by the Team Leader then the Director; HR's acknowledgement never blocks it.
 - A task can be given to several people at once (one task each), and each checklist step can be given to one person or to the whole team.
 - Tasks with owner, team, project, priority, start and due dates, checklist, comments and a status note.
 - Customisable statuses grouped into categories (to do, active, review, paused, done, closed). Overdue is worked out automatically.
@@ -28,8 +29,8 @@ Start with **SETUP.md**.
 - **Calendar** (everyone): month and week views of due dates, approved leave and public holidays, filtered by team and
   person. Leaders also see warnings for days that are short-staffed (half the team or more away) or heavy (three or more
   deadlines for each person available), and tasks due while their owner is on leave.
-- **Leave** (everyone): members request leave (annual, sick, training, other; full or half days). Team Leaders, Managers
-  and the Director approve or decline (a decline needs a reason), record leave for someone, and set public holidays.
+- **Leave** (everyone): members request leave (annual, sick, training, other; full or half days). The Team Leader approves first, then the Director
+  (a decline needs a reason; HR is told for acknowledgement only). Leaders can also record leave for someone, and the Director sets public holidays.
   Only approved leave counts. Assistant Team Leaders can see their team's leave but not decide on it.
 - **Team overview** (Assistant Team Leader and above): filter by team and person. Status breakdown, workload per person,
   completed per week (on time vs late), on-time rate, 14-day availability grid, needs-attention list, deadlines for the
@@ -58,6 +59,7 @@ Start with **SETUP.md**.
   still be edited or removed. The dates are in `js/data/holidays-my-kl.js`, taken from the Cabinet Division's gazette tables.
   Dates marked "may move" (Hari Raya, Deepavali) follow the moon, so check them when the government announces changes.
 - Leave and holiday changes are written to the activity log like everything else.
+- Leave balances (entitled, taken, waiting, remaining) use the HR entitlement table and count working days only.
 - Limits to know: the Director has no team, so cannot request leave; a person in two teams gets one request per team;
   team members cannot see colleagues' leave (sick leave is private to the person and their leaders).
 

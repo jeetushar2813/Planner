@@ -144,7 +144,7 @@ export function renderCalendar(container) {
     return {
       scopeIds, people, approved, tasksAll,
       tasks: tasksAll.filter((t) => !f.personId || t.ownerId === f.personId),
-      leaves: data.leaves.filter((l) => ['approved', 'pending'].includes(l.status) && scopeIds.includes(l.teamId)
+      leaves: data.leaves.filter((l) => (l.status === 'approved' || perm.isPendingLeave(l)) && scopeIds.includes(l.teamId)
         && (!f.personId || l.userId === f.personId) && (leaderView || l.userId === user.id)),
       holidays: data.holidays.filter((x) => x.active !== false && (!x.teamId || scopeIds.includes(x.teamId)))
     };
@@ -181,9 +181,9 @@ export function renderCalendar(container) {
         const half = l.half && l.half !== 'full' ? ' ½' : '';
         const label = `${firstName(l.userName)} · ${LEAVE_TYPE_LABEL[l.type].split(' ')[0].toLowerCase()}${half}`;
         chips.push(h('div', {
-          class: 'chip-cal chip-leave' + (l.status === 'pending' ? ' chip-pending' : ''),
-          title: `${l.userName}: ${LEAVE_TYPE_LABEL[l.type]}${half ? ' (half day)' : ''}${l.status === 'pending' ? ', waiting for approval' : ''}`
-        }, label + (l.status === 'pending' ? ' ?' : '')));
+          class: 'chip-cal chip-leave' + (perm.isPendingLeave(l) ? ' chip-pending' : ''),
+          title: `${l.userName}: ${LEAVE_TYPE_LABEL[l.type]}${half ? ' (half day)' : ''}${perm.isPendingLeave(l) ? ', waiting for approval' : ''}`
+        }, label + (perm.isPendingLeave(l) ? ' ?' : '')));
       }
       if (info.leaves.length > lv.length) chips.push(h('div', { class: 'cal-more' }, `+${info.leaves.length - lv.length} on leave`));
     }
@@ -239,7 +239,7 @@ export function renderCalendar(container) {
     if (leaderView || leaves.length) {
       body.append(section(`On leave (${leaves.length})`, leaves.length
         ? h('ul', { class: 'plain-list' }, leaves.map((l) => h('li', null, h('strong', null, l.userName), ` · ${LEAVE_TYPE_LABEL[l.type]}`,
-          l.half && l.half !== 'full' ? ' (half day)' : '', l.status === 'pending' ? h('span', { class: 'muted' }, ' · waiting for approval') : null)))
+          l.half && l.half !== 'full' ? ' (half day)' : '', perm.isPendingLeave(l) ? h('span', { class: 'muted' }, ' · waiting for approval') : null)))
         : h('p', { class: 'muted' }, 'Nobody.')));
     }
     body.append(section(`Due (${info.tasks.length})`, info.tasks.length

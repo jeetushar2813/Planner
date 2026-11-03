@@ -220,17 +220,20 @@ function seed() {
     ['mei',    'Mei Ling',     'member',      ['content']],
     ['omar',   'Omar Hakim',   'member',      ['content']],
     ['priya',  'Priya Kumar',  'member',      ['dev']],
-    ['raj',    'Raj Singh',    'member',      ['dev']]
+    ['raj',    'Raj Singh',    'member',      ['dev']],
+    ['hana',   'Hana Yusof',   'leader',      ['hr']]   // leads the HR team and has the HR switch on
   ];
   for (const [id, name, role, teamIds] of people) {
     put('users', id, {
       name, email: `${id}@demo.test`, role, teamIds, active: true,
+      ...(id === 'hana' ? { hr: true } : {}),
       createdAt: now, lastLoginAt: id === 'dana' ? now : null, lastLogId: 'seed'
     });
     auth[id] = { email: `${id}@demo.test`, password: 'demo' };
   }
 
   put('teams', 'content', { name: 'Content Team', approvalGate: true, active: true, createdAt: now, lastLogId: 'seed' });
+  put('teams', 'hr', { name: 'HR Team', approvalGate: true, active: true, createdAt: now, lastLogId: 'seed' });
   put('teams', 'dev', { name: 'Development Team', approvalGate: true, active: true, createdAt: now, lastLogId: 'seed' });
 
   put('projects', 'p_edu', { name: 'EduEdge Term 1', teamId: 'content', description: 'Chapter amendments and QC rounds', ownerId: 'priya', active: true, createdAt: now, lastLogId: 'seed' });
@@ -327,6 +330,17 @@ function seed() {
   leave('l3', 'omar', 'content', 'annual', weekday(9), weekday(11), 'pending', 'full', 'Short trip');
   leave('l4', 'raj', 'dev', 'training', weekday(5), weekday(5), 'approved', 'full', 'Unity workshop');
   leave('l5', 'arun', 'content', 'annual', weekday(14), weekday(18), 'approved');
+  // Waiting for the Director (the Team Leader already approved), and one HR has acknowledged.
+  leave('l6', 'mei', 'content', 'sick', weekday(20), weekday(21), 'leader_ok', 'full', 'Medical appointment');
+  put('leaves', 'l6', { ...data.leaves.l6, leaderBy: 'lena', leaderAt: now });
+  leave('l7', 'priya', 'dev', 'marriage', weekday(-30), weekday(-28), 'approved', 'full', 'Wedding');
+  put('leaves', 'l7', { ...data.leaves.l7, decidedBy: 'dana', leaderBy: 'devi', leaderAt: now, hrAckBy: 'hana', hrAckAt: now });
+  // Leave entitlements HR has set for this year (Raj has an exception for annual leave).
+  const thisYear = String(new Date().getFullYear());
+  put('leavePolicy', thisYear, {
+    year: thisYear, days: { annual: 14, sick: 14, hospitalization: 60, compassionate: 3, marriage: 3 },
+    overrides: { raj: { annual: 18 } }, updatedAt: now, lastLogId: 'seed'
+  });
   const holiday = (id, name, date, teamId) => put('holidays', id, { name, date, teamId, active: true, createdAt: now, lastLogId: 'seed' });
   holiday('hol1', 'Company day off (sample)', weekday(12), null);
   holiday('hol2', 'Content team offsite (sample)', weekday(6), 'content');

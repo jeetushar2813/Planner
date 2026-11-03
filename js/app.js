@@ -6,7 +6,7 @@ import { roleLabel } from './core/model.js';
 import { appSettings } from './config.js';
 import * as perm from './core/perm.js';
 import {
-  state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError
+  state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError, hrQueue, refreshHrQueue
 } from './core/store.js';
 import { loadBackend } from './backend/index.js';
 import { renderLogin } from './ui/login.js';
@@ -21,6 +21,7 @@ import { renderProjects } from './ui/projects.js';
 import { renderProfile } from './ui/profile.js';
 import { applyTheme, savedTheme } from './core/theme.js';
 import { renderPeople } from './ui/people.js';
+import { renderHr } from './ui/hr.js';
 import { renderTeams } from './ui/teams.js';
 import { renderStatuses } from './ui/statuses.js';
 import { avatar, toast, errorMessage, spinner } from './ui/components.js';
@@ -36,6 +37,7 @@ const ROUTES = [
   { path: 'team', label: 'Team tasks', icon: '▦', allow: () => true, render: renderTeamTasks },
   { path: 'calendar', label: 'Calendar', icon: '▤', allow: () => true, render: renderCalendar },
   { path: 'leave', label: 'Leave', icon: '☂', allow: () => true, render: renderLeave },
+  { path: 'hr', label: 'HR leave', icon: '✚', allow: perm.canSeeHr, render: renderHr },
   { path: 'projects', label: 'My projects', icon: '◇', allow: perm.canSeeProjects, render: renderProjects },
   { path: 'overview', label: 'Team overview', icon: '▥', allow: perm.canSeeOverview, render: renderOverview },
   { path: 'reports', label: 'Reports', icon: '▨', allow: perm.canSeeReports, render: renderReports },
@@ -105,6 +107,7 @@ function showLogin(message = '') {
 // -------------------------------------------------------------------- shell
 
 let shellRefListener = null;
+let hrBadgeListener = null;
 function showShell() {
   const user = state.user;
   navLinks = [];
@@ -117,6 +120,17 @@ function showShell() {
       h('span', { class: 'nav-icon', 'aria-hidden': 'true' }, r.icon), r.label);
     navLinks.push(link);
     nav.append(link);
+    if (r.path === 'hr') {
+      // Approved leave HR has not acknowledged yet.
+      const badge = h('span', { class: 'nav-badge', hidden: true, 'aria-label': 'waiting to acknowledge' });
+      link.append(badge);
+      const show = () => { badge.textContent = hrQueue.count; badge.hidden = !hrQueue.count; };
+      if (hrBadgeListener) bus.removeEventListener('hr', hrBadgeListener);
+      hrBadgeListener = show;
+      bus.addEventListener('hr', show);
+      show();
+      refreshHrQueue({ force: true }).catch(() => {});
+    }
   }
 
   const freshness = h('p', { class: 'freshness muted' });
@@ -126,7 +140,7 @@ function showShell() {
   drawFreshness();
   // If this person's own role, Superuser switch or owned projects change (for example a
   // Director edits themselves), rebuild the menu so it shows what they can now do.
-  const sig = (u) => [u?.role, u?.superuser === true, (u?.ownedProjectIds || []).join(',')].join('|');
+  const sig = (u) => [u?.role, u?.superuser === true, u?.hr === true, (u?.ownedProjectIds || []).join(',')].join('|');
   const built = sig(user);
   const onRef = () => {
     drawFreshness();

@@ -311,6 +311,8 @@ table.log td { vertical-align: top; }
 .checklist .step-done { flex-basis: 100%; padding-left: 26px; }
 .checklist .step-done:empty { display: none; }
 .chip-step { background: var(--accent-soft); color: var(--accent); }
+.chip-hr { background: var(--accent-soft); color: var(--accent); margin-left: 8px; }
+.chip-lv-leader_ok { background: var(--accent-soft); color: var(--accent); }
 .chip-super { background: var(--warn-soft); color: var(--warn); margin-left: 8px; }
 .assignee-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
 .assignee-tools .assignee-search { flex: 1 1 160px; min-width: 0; }
@@ -634,3 +636,12 @@ table.avail thead th { font-weight: 600; color: var(--muted); height: 40px; bord
 .sample.split { grid-template-columns: 1fr 1fr; }
 .sample.split > div { display: grid; grid-template-columns: 1fr; background: var(--bg); padding: 8px; align-content: start; gap: 5px; }
 @media (max-width: 900px) { .profile-grid { grid-template-columns: 1fr; } }
+
+/* HR leave */
+.neg { color: var(--danger); }
+.nav-badge { margin-left: auto; min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--danger); color: #fff; font-size: .72rem; font-weight: 600; line-height: 20px; text-align: center; }
+.nav-badge[hidden] { display: none; }
+.ent-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 8px; }
+.days-input { width: 100%; max-width: 110px; text-align: right; }
+.balance-table td.num, .balance-table th.num { white-space: nowrap; }
+.notice { background: var(--warn-soft); color: var(--warn); padding: 10px 14px; border-radius: 8px; margin: 0 0 12px; }

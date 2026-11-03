@@ -8,6 +8,9 @@ rules_version = '2';
 // enforced here.
 //
 // Roles (stored in users/{uid}.role): director, manager, leader, asst_leader, member
+// HR (users/{uid}.hr == true): sets the yearly leave entitlements, acknowledges approved leave and
+// reads every leave record. It is a switch on the account, so an HR person keeps their own role and
+// team. Only a Director or Superuser can switch it on; being a Director gives none of these HR powers.
 // Superuser (users/{uid}.superuser == true): every power of the Director, whatever the role.
 // Only a Director or another Superuser can switch it on or off.
 // Scope: a person's teams are stored in users/{uid}.teamIds. Everyone except the
@@ -37,6 +40,7 @@ service cloud.firestore {
     // A Superuser keeps their own role (for example Team Leader) but has Director powers.
     // The field is optional, so older accounts without it are read with a default.
     function isSuperuser()  { return active() && me().get('superuser', false) == true; }
+    function isHr()         { return active() && me().get('hr', false) == true; }
     function isDirector()   { return active() && (role() == 'director' || me().get('superuser', false) == true); }
     function isLeaderUp()   { return active() && (role() in ['director', 'manager', 'leader'] || me().get('superuser', false) == true); }
     function inTeam(teamId) { return active() && teamId in me().teamIds; }
@@ -275,6 +279,7 @@ service cloud.firestore {
           && d.role in ['director', 'manager', 'leader', 'asst_leader', 'member']
           && d.teamIds is list && d.teamIds.size() <= 20
           && (!('superuser' in d) || d.superuser is bool)
+          && (!('hr' in d) || d.hr is bool)
           && d.active is bool;
       }
 
@@ -443,12 +448,14 @@ service cloud.firestore {
           && d.userId is string
           && d.userName is string && d.userName.size() <= 100
           && d.teamId is string
-          && d.type in ['annual', 'sick', 'training', 'other']
+          && d.type in ['annual', 'sick', 'training', 'other', 'compassionate', 'marriage', 'hospitalization']
           && d.startDate is string && d.startDate.size() == 10
           && d.endDate is string && d.endDate.size() == 10 && d.endDate >= d.startDate
           && d.half in ['full', 'am', 'pm'] && (d.half == 'full' || d.startDate == d.endDate)
           && d.reason is string && d.reason.size() <= 300
-          && d.status in ['pending', 'approved', 'declined', 'cancelled']
+          && d.status in ['pending', 'leader_ok', 'approved', 'declined', 'cancelled']
+          && (!('leaderBy' in d) || d.leaderBy == null || d.leaderBy is string)
+          && (!('hrAckBy' in d) || d.hrAckBy == null || d.hrAckBy is string)
           && (d.decisionNote == null || (d.decisionNote is string && d.decisionNote.size() <= 300));
       }
 
@@ -469,7 +476,9 @@ service cloud.firestore {
       allow get, list: if active()
         && (isDirector()
             || resource.data.userId == request.auth.uid
-            || (role() in ['manager', 'leader', 'asst_leader'] && inTeam(resource.data.teamId)));
+            || (role() in ['manager', 'leader', 'asst_leader'] && inTeam(resource.data.teamId))
+            // HR reads every leave record (read-only), to acknowledge it and to work out balances.
+            || isHr());
 
       allow create: if active()
         && validLeave(request.resource.data)
@@ -478,22 +487,41 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time
         && person(request.resource.data.userId).teamIds.hasAny([request.resource.data.teamId])
         && person(request.resource.data.userId).name == request.resource.data.userName
+        && request.resource.data.get('hrAckBy', null) == null
         && (
-          // Own request: waits for approval.
+          // Own request. It goes to the Team Leader first. A Manager or Team Leader has no one
+          // above them in the team, so theirs goes straight to the Director. A Director or
+          // Superuser may approve their own.
           (request.resource.data.userId == request.auth.uid
             && inTeam(request.resource.data.teamId)
-            && request.resource.data.status == 'pending'
-            && request.resource.data.decidedBy == null
-            && request.resource.data.decidedAt == null
-            && request.resource.data.decisionNote == null)
+            && request.resource.data.decisionNote == null
+            && request.resource.data.get('leaderBy', null) == null
+            && ((request.resource.data.status == 'pending'
+                  && request.resource.data.decidedBy == null
+                  && request.resource.data.decidedAt == null)
+                || (request.resource.data.status == 'leader_ok'
+                    && (role() in ['manager', 'leader'] || isDirector())
+                    && request.resource.data.decidedBy == null
+                    && request.resource.data.decidedAt == null)
+                || (request.resource.data.status == 'approved'
+                    && isDirector()
+                    && request.resource.data.decidedBy == request.auth.uid
+                    && request.resource.data.decidedAt == request.time)))
           ||
-          // Recorded for someone else by their leader: approved at once.
+          // Recorded for someone else. A Team Leader or Manager's record counts as the Team
+          // Leader's approval and waits for the Director; the Director's record is final.
           (request.resource.data.userId != request.auth.uid
             && approver(request.resource.data.teamId)
-            && request.resource.data.status == 'approved'
-            && request.resource.data.decidedBy == request.auth.uid
-            && request.resource.data.decidedAt == request.time
-            && request.resource.data.decisionNote == null)
+            && request.resource.data.decisionNote == null
+            && ((request.resource.data.status == 'leader_ok'
+                  && request.resource.data.get('leaderBy', null) == request.auth.uid
+                  && request.resource.data.get('leaderAt', null) == request.time
+                  && request.resource.data.decidedBy == null
+                  && request.resource.data.decidedAt == null)
+                || (request.resource.data.status == 'approved'
+                    && isDirector()
+                    && request.resource.data.decidedBy == request.auth.uid
+                    && request.resource.data.decidedAt == request.time)))
         )
         && logged('leave', leaveId, request.resource.data.lastLogId);
 
@@ -506,18 +534,45 @@ service cloud.firestore {
           // Cancel: the person, or an approver for that team.
           (changed().hasOnly(['status', 'updatedAt', 'lastLogId'])
             && request.resource.data.status == 'cancelled'
-            && resource.data.status in ['pending', 'approved']
+            && resource.data.status in ['pending', 'leader_ok', 'approved']
             && (resource.data.userId == request.auth.uid || approver(resource.data.teamId)))
           ||
-          // Decide: an approver, never on their own request (except the Director).
-          (changed().hasOnly(['status', 'decidedBy', 'decidedAt', 'decisionNote', 'updatedAt', 'lastLogId'])
+          // Step 1, Team Leader (or Manager, or Director): pending -> waiting for the Director.
+          // Never on their own request, except the Director.
+          (changed().hasOnly(['status', 'leaderBy', 'leaderAt', 'updatedAt', 'lastLogId'])
             && resource.data.status == 'pending'
-            && request.resource.data.status in ['approved', 'declined']
+            && request.resource.data.status == 'leader_ok'
             && approver(resource.data.teamId)
             && (resource.data.userId != request.auth.uid || isDirector())
+            && request.resource.data.leaderBy == request.auth.uid
+            && request.resource.data.leaderAt == request.time)
+          ||
+          // Step 2, the Director (or a Superuser): waiting for the Director -> approved.
+          (changed().hasOnly(['status', 'decidedBy', 'decidedAt', 'decisionNote', 'updatedAt', 'lastLogId'])
+            && resource.data.status == 'leader_ok'
+            && request.resource.data.status == 'approved'
+            && isDirector()
+            && request.resource.data.decidedBy == request.auth.uid
+            && request.resource.data.decidedAt == request.time)
+          ||
+          // Decline, with a reason: the Team Leader at step 1, the Director at either step.
+          (changed().hasOnly(['status', 'decidedBy', 'decidedAt', 'decisionNote', 'updatedAt', 'lastLogId'])
+            && request.resource.data.status == 'declined'
+            && request.resource.data.decisionNote is string
             && request.resource.data.decidedBy == request.auth.uid
             && request.resource.data.decidedAt == request.time
-            && (request.resource.data.status == 'approved' || request.resource.data.decisionNote is string))
+            && ((resource.data.status == 'pending' && approver(resource.data.teamId))
+                || (resource.data.status == 'leader_ok' && isDirector()))
+            && (resource.data.userId != request.auth.uid || isDirector()))
+          ||
+          // HR acknowledges approved leave. This is a record only; it changes nothing about
+          // the approval, and leave is already approved without it.
+          (changed().hasOnly(['hrAckBy', 'hrAckAt', 'updatedAt', 'lastLogId'])
+            && resource.data.status == 'approved'
+            && resource.data.get('hrAckBy', null) == null
+            && isHr()
+            && request.resource.data.hrAckBy == request.auth.uid
+            && request.resource.data.hrAckAt == request.time)
         )
         && logged('leave', leaveId, request.resource.data.lastLogId);
 
@@ -563,6 +618,46 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // ------------------------------------------------------------ leave entitlements
+    //
+    // One document per year (id = "2026"): the days everyone gets for each kind of leave, plus
+    // exceptions for named people. Everyone can read it (people need to see their own balance);
+    // only HR can write it.
+
+    match /leavePolicy/{year} {
+
+      function validDays(m) {
+        return m.keys().hasOnly(['annual', 'sick', 'compassionate', 'marriage', 'hospitalization'])
+          && (!('annual' in m) || (m.annual is number && m.annual >= 0 && m.annual <= 366))
+          && (!('sick' in m) || (m.sick is number && m.sick >= 0 && m.sick <= 366))
+          && (!('compassionate' in m) || (m.compassionate is number && m.compassionate >= 0 && m.compassionate <= 366))
+          && (!('marriage' in m) || (m.marriage is number && m.marriage >= 0 && m.marriage <= 366))
+          && (!('hospitalization' in m) || (m.hospitalization is number && m.hospitalization >= 0 && m.hospitalization <= 366));
+      }
+
+      function validPolicy(d) {
+        return d.keys().hasAll(['year', 'days', 'overrides', 'updatedAt', 'lastLogId'])
+          && d.year == year
+          && year.matches('^20[0-9][0-9]$')
+          && d.days is map && validDays(d.days)
+          && d.overrides is map && d.overrides.size() <= 300
+          && d.updatedAt == request.time;
+      }
+
+      allow get, list: if active();
+
+      allow create: if isHr()
+        && validPolicy(request.resource.data)
+        && logged('policy', year, request.resource.data.lastLogId);
+
+      allow update: if isHr()
+        && validPolicy(request.resource.data)
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && logged('policy', year, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
     // ------------------------------------------------------------ activity log
 
     match /activityLog/{logId} {
@@ -576,7 +671,7 @@ service cloud.firestore {
           && d.actorId == request.auth.uid
           && d.actorRole == role()
           && d.action is string && d.action.size() <= 40
-          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday']
+          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy']
           && d.entityId is string
           && d.entityTitle is string && d.entityTitle.size() <= 300
           && (d.teamId == null || d.teamId is string)

@@ -13,7 +13,7 @@ export const ROLE_LABEL = {
 
 // "Superuser" is not a role: it is a switch on a person's account (users/{id}.superuser) that gives
 // them everything a Director can do while they keep their own role (for example Team Leader).
-export const roleLabel = (u) => `${ROLE_LABEL[u?.role] || u?.role || ''}${u?.superuser ? ' · Superuser' : ''}`;
+export const roleLabel = (u) => `${ROLE_LABEL[u?.role] || u?.role || ''}${u?.superuser ? ' · Superuser' : ''}${u?.hr ? ' · HR' : ''}`;
 
 // Higher number = more authority.
 export const ROLE_LEVEL = { director: 5, manager: 4, leader: 3, asst_leader: 2, member: 1 };
@@ -72,16 +72,27 @@ export const ACTION_LABEL = {
   'leave.approve': 'Approved leave',
   'leave.decline': 'Declined leave',
   'leave.cancel': 'Cancelled leave',
+  'leave.leader': 'Team Leader approved leave',
+  'leave.ack': 'HR acknowledged leave',
+  'policy.update': 'Updated leave entitlements',
   'holiday.create': 'Added holiday',
   'holiday.update': 'Edited holiday'
 };
 
-export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday'];
+export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy'];
 
 // Leave. Only APPROVED leave counts towards availability on the calendar.
-export const LEAVE_TYPES = ['annual', 'sick', 'training', 'other'];
-export const LEAVE_TYPE_LABEL = { annual: 'Annual leave', sick: 'Sick / medical leave', training: 'Training', other: 'Other' };
-export const LEAVE_STATUS_LABEL = { pending: 'Waiting for approval', approved: 'Approved', declined: 'Declined', cancelled: 'Cancelled' };
+export const LEAVE_TYPES = ['annual', 'sick', 'hospitalization', 'compassionate', 'marriage', 'training', 'other'];
+// The kinds HR sets a yearly number of days for. Training and Other are not counted.
+export const ENTITLED_TYPES = ['annual', 'sick', 'hospitalization', 'compassionate', 'marriage'];
+export const LEAVE_TYPE_LABEL = {
+  annual: 'Annual leave', sick: 'Medical leave', hospitalization: 'Hospitalization leave',
+  compassionate: 'Compassionate leave', marriage: 'Marriage leave', training: 'Training', other: 'Other'
+};
+export const LEAVE_STATUS_LABEL = {
+  pending: 'Waiting for Team Leader', leader_ok: 'Team Leader approved, waiting for Director',
+  approved: 'Approved', declined: 'Declined', cancelled: 'Cancelled'
+};
 export const HALF_LABEL = { full: 'Full day', am: 'Morning only', pm: 'Afternoon only' };
 
 // How long cached reference data (people, teams, statuses, projects) is reused

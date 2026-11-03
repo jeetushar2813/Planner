@@ -487,3 +487,132 @@ describe('checklist steps given to people', () => {
     assert.equal(perm.canAssignSteps({ id: 'x', role: 'leader', teamIds: ['t2'] }, task), false);
   });
 });
+
+// ------------------------------------------------------- HR, entitlements, approval steps
+
+import { entitlementFor, groupLeaves, daysInYear, personBalance, balances, parseDays, buildPolicy, dayText } from '../js/core/entitlement.js';
+import { ENTITLED_TYPES, LEAVE_STATUS_LABEL, LEAVE_TYPE_LABEL } from '../js/core/model.js';
+
+describe('leave approval in two steps', () => {
+  const member = { id: 'm', role: 'member', teamIds: ['t1'] };
+  const leader = { id: 'l', role: 'leader', teamIds: ['t1'] };
+  const otherLeader = { id: 'l2', role: 'leader', teamIds: ['t2'] };
+  const director = { id: 'd', role: 'director', teamIds: [] };
+  const hr = { id: 'h', role: 'member', teamIds: ['t3'], hr: true };
+  const leave = (status, over = {}) => ({ id: 'x', userId: 'm', teamId: 't1', status, ...over });
+
+  test('step 1 is the Team Leader of the team, step 2 only the Director', () => {
+    assert.equal(perm.canApproveLeave(leader, leave('pending')), true);
+    assert.equal(perm.canApproveLeave(otherLeader, leave('pending')), false);
+    assert.equal(perm.canApproveLeave(member, leave('pending')), false);
+    assert.equal(perm.canApproveLeave(leader, leave('leader_ok')), false);      // a Team Leader cannot give the final approval
+    assert.equal(perm.canApproveLeave(director, leave('leader_ok')), true);
+    assert.equal(perm.canApproveLeave({ ...leader, superuser: true }, leave('leader_ok')), true);
+  });
+  test('nothing is decided twice, and nobody approves their own request (except the Director)', () => {
+    for (const st of ['approved', 'declined', 'cancelled']) assert.equal(perm.canApproveLeave(director, leave(st)), false);
+    assert.equal(perm.canApproveLeave(leader, leave('pending', { userId: 'l' })), false);
+    assert.equal(perm.canApproveLeave(director, leave('pending', { userId: 'd' })), true);
+  });
+  test('HR does not approve, cannot cancel, and is not made a Director by the switch', () => {
+    assert.equal(perm.canApproveLeave(hr, leave('pending')), false);
+    assert.equal(perm.canApproveLeave(hr, leave('leader_ok')), false);
+    assert.equal(perm.canCancelLeave(hr, leave('approved')), false);
+    assert.equal(perm.isDirector(hr), false);
+    assert.equal(perm.isLeaderUp(hr), false);
+  });
+  test('a request waiting on someone counts as waiting; the person can cancel it', () => {
+    assert.equal(perm.isPendingLeave(leave('pending')), true);
+    assert.equal(perm.isPendingLeave(leave('leader_ok')), true);
+    assert.equal(perm.isPendingLeave(leave('approved')), false);
+    assert.equal(perm.canCancelLeave(member, leave('leader_ok')), true);
+    assert.equal(perm.leaveStep(leave('pending')), 'leader');
+    assert.equal(perm.leaveStep(leave('leader_ok')), 'director');
+    assert.equal(perm.leaveStep(leave('approved')), null);
+  });
+  test('Director and Superuser do not get HR powers; only the HR switch does', () => {
+    for (const u of [director, { id: 's', role: 'leader', teamIds: ['t1'], superuser: true }, leader]) {
+      assert.equal(perm.canSeeHr(u), false);
+      assert.equal(perm.canSetEntitlements(u), false);
+      assert.equal(perm.canAcknowledgeLeave(u, leave('approved')), false);
+    }
+    assert.equal(perm.canSeeHr(hr), true);
+    assert.equal(perm.canSetEntitlements(hr), true);
+    assert.equal(perm.canAcknowledgeLeave(hr, leave('approved')), true);
+    assert.equal(perm.canAcknowledgeLeave(hr, leave('approved', { hrAckBy: 'h' })), false);   // only once
+    assert.equal(perm.canAcknowledgeLeave(hr, leave('pending')), false);                       // only approved leave
+    assert.equal(perm.isHr({ hr: 'true' }), false);
+  });
+  test('labels', () => {
+    assert.match(LEAVE_STATUS_LABEL.leader_ok, /Director/);
+    assert.equal(LEAVE_TYPE_LABEL.sick, 'Medical leave');
+    assert.deepEqual(ENTITLED_TYPES, ['annual', 'sick', 'hospitalization', 'compassionate', 'marriage']);
+    assert.equal(roleLabel({ role: 'leader', hr: true }), 'Team Leader · HR');
+  });
+});
+
+describe('leave entitlements and balances', () => {
+  const policy = { year: '2026', days: { annual: 14, sick: 14, marriage: 3 }, overrides: { b: { annual: 18 } } };
+  const A = { id: 'a', name: 'Aa', teamIds: ['t1'] }, B = { id: 'b', name: 'Bb', teamIds: ['t1'] };
+  const lv = (id, userId, type, startDate, endDate, status, over = {}) =>
+    ({ id, userId, userName: userId, teamId: 't1', type, startDate, endDate, half: 'full', status, ...over });
+
+  test('an exception beats the company number; unset kinds are not tracked', () => {
+    assert.equal(entitlementFor(policy, 'a', 'annual'), 14);
+    assert.equal(entitlementFor(policy, 'b', 'annual'), 18);
+    assert.equal(entitlementFor(policy, 'b', 'sick'), 14);          // exception only changes annual
+    assert.equal(entitlementFor(policy, 'a', 'compassionate'), null);
+    assert.equal(entitlementFor(policy, 'a', 'training'), null);    // never counted
+    assert.equal(entitlementFor(null, 'a', 'annual'), null);
+    assert.equal(entitlementFor({ days: { annual: 0 } }, 'a', 'annual'), 0);   // zero is a real number
+  });
+  test('copies of one request in two teams count once', () => {
+    const g = groupLeaves([lv('1', 'a', 'annual', '2026-03-02', '2026-03-03', 'approved'), lv('2', 'a', 'annual', '2026-03-02', '2026-03-03', 'approved', { teamId: 't2' })]);
+    assert.equal(g.length, 1);
+    assert.equal(g[0].status, 'approved');
+    assert.equal(g[0].docs.length, 2);
+    const half = groupLeaves([lv('1', 'a', 'annual', '2026-03-02', '2026-03-03', 'approved'), lv('2', 'a', 'annual', '2026-03-02', '2026-03-03', 'leader_ok', { teamId: 't2' })]);
+    assert.equal(half[0].status, 'pending');                          // one team has not finished approving
+    const dead = groupLeaves([lv('1', 'a', 'annual', '2026-03-02', '2026-03-03', 'declined')]);
+    assert.equal(dead[0].status, 'ignore');
+  });
+  test('taken, waiting and left; weekends and holidays are not used', () => {
+    // 2026-03-02 is a Monday.
+    const leaves = [
+      lv('1', 'a', 'annual', '2026-03-02', '2026-03-06', 'approved'),       // 5 working days taken
+      lv('2', 'a', 'annual', '2026-04-06', '2026-04-07', 'leader_ok'),      // 2 waiting
+      lv('3', 'a', 'annual', '2026-05-04', '2026-05-04', 'declined'),       // ignored
+      lv('4', 'a', 'sick', '2026-06-01', '2026-06-01', 'approved', { half: 'am' })   // half a day
+    ];
+    const b = personBalance({ person: A, groups: groupLeaves(leaves), policy, holidays: [], year: 2026 });
+    assert.deepEqual(b.annual, { entitled: 14, used: 5, pending: 2, left: 7 });
+    assert.deepEqual(b.sick, { entitled: 14, used: 0.5, pending: 0, left: 13.5 });
+    assert.deepEqual(b.compassionate, { entitled: null, used: 0, pending: 0, left: null });
+    const withHoliday = personBalance({ person: A, groups: groupLeaves(leaves), policy, holidays: [{ date: '2026-03-04', name: 'H', teamId: null, active: true }], year: 2026 });
+    assert.equal(withHoliday.annual.used, 4);
+  });
+  test('a leave over New Year only counts the days inside the year', () => {
+    // Thu 2026-12-31 and Fri 2027-01-01: one working day in each year.
+    const g = groupLeaves([lv('1', 'a', 'annual', '2026-12-31', '2027-01-04', 'approved')]);
+    assert.equal(daysInYear(g[0], A, [], 2026), 1);
+    assert.equal(daysInYear(g[0], A, [], 2027), 2);   // Fri 1 Jan and Mon 4 Jan
+  });
+  test('one table for everyone', () => {
+    const rows = balances({ people: [A, B], leaves: [lv('1', 'b', 'annual', '2026-03-02', '2026-03-02', 'approved')], policy, holidays: [], year: 2026 });
+    assert.equal(rows[0].byType.annual.left, 14);
+    assert.equal(rows[1].byType.annual.entitled, 18);
+    assert.equal(rows[1].byType.annual.left, 17);
+  });
+  test('what HR types is checked', () => {
+    assert.deepEqual(parseDays('14'), { ok: true, value: 14 });
+    assert.deepEqual(parseDays(' 7.5 '), { ok: true, value: 7.5 });
+    assert.deepEqual(parseDays(''), { ok: true, value: null });
+    for (const bad of ['-1', '367', 'abc', '1.3', '1e9', 'NaN']) assert.equal(parseDays(bad).ok, false, bad);
+    assert.equal(dayText(null), '–');
+    assert.equal(dayText(7.5), '7.5');
+  });
+  test('the saved document holds only numbers that were set', () => {
+    const doc = buildPolicy(2026, { annual: 14, sick: undefined, marriage: 3 }, { u1: { annual: 20, sick: undefined }, u2: {} });
+    assert.deepEqual(doc, { year: '2026', days: { annual: 14, marriage: 3 }, overrides: { u1: { annual: 20 } } });
+  });
+});
