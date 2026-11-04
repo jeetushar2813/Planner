@@ -272,7 +272,7 @@ describe('report numbers', () => {
   });
   test('the Excel workbook builds with every sheet', () => {
     const sheets = reportSheets(model, { user: (id) => id, team: (id) => id, status: (id) => id, project: (id) => id, today: T, scope: 'Test', by: 'Tester' });
-    assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Steps done', 'Open today', 'Leave', 'Holidays']);
+    assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'People', 'Projects', 'Over time', 'Due in period', 'Backlog', 'Completed', 'Steps done', 'Open today', 'Leave', 'Holidays']);
     const bytes = buildXlsx(sheets);
     assert.equal(String.fromCharCode(bytes[0], bytes[1]), 'PK');
     assert.ok(bytes.length > 2000);
@@ -335,7 +335,7 @@ describe('project owners', () => {
     model.scopeKind = 'project'; model.peopleInvolved = 2;
     assert.equal(model.headline.completed, 1); assert.equal(model.headline.overdueNow, 1);
     const names = reportSheets(model, { user: (i) => i, team: (i) => i, status: (i) => i, project: (i) => i, today: T, scope: 'Project: Proj', by: 'Pat' }).map((s) => s.name);
-    assert.deepEqual(names, ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Steps done', 'Open today']);
+    assert.deepEqual(names, ['Summary', 'People', 'Projects', 'Over time', 'Due in period', 'Backlog', 'Completed', 'Steps done', 'Open today']);
   });
 });
 
@@ -1144,5 +1144,96 @@ describe('key dates', () => {
     assert.match(text, /Key dates in the next 14 days \(1\)/);
     assert.match(text, /- Exam week: 10 Nov to 13 Nov \(in 6 days, Exams\)/);
     assert.equal(compileWeekly({ people: [], tasks: [], leaves: [], holidays: [], week: w, today: '2026-11-04' }).keys.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------- planned work and backlog in reports
+import { planOf, OUTCOME_LABEL } from '../js/core/report.js';
+
+describe('report: due in the period, and backlog', () => {
+  const T = '2026-11-03';
+  const people = [{ id: 'a', name: 'Ann', teamIds: ['t1'] }, { id: 'b', name: 'Bob', teamIds: ['t1'] }];
+  const mk = (id, ownerId, over = {}) => ({ id, title: id, ownerId, teamId: 't1', projectId: null, status: 'done', statusCategory: 'done', archived: false,
+    createdAt: new Date('2026-08-01T09:00:00'), dueDate: null, completedDate: null, reworks: 0, ...over });
+  const open = { status: 'pending', statusCategory: 'todo', completedDate: null };
+  const oct = [
+    mk('e1', 'a', { dueDate: '2026-10-10', completedDate: '2026-10-09' }),                         // on time
+    mk('e2', 'a', { dueDate: '2026-10-10', completedDate: '2026-10-12' }),                         // late, inside the period
+    mk('e3', 'b', { dueDate: '2026-10-20', completedDate: '2026-10-20' }),                         // finished on the due day = on time
+    mk('e4', 'b', { dueDate: '2026-10-25', completedDate: '2026-11-02' }),                         // finished after the period
+    mk('e5', 'a', { dueDate: '2026-10-28', ...open }),                                             // still open: overdue
+    mk('e6', 'b', { dueDate: '2026-10-29', completedDate: '2026-09-20' }),                         // finished early, before the period
+    mk('e7', 'a', { dueDate: '2026-10-15', status: 'cancelled', statusCategory: 'closed' }),        // cancelled: not counted
+    mk('e8', 'b', { dueDate: '2026-10-31', createdAt: new Date('2026-11-01T09:00:00'), ...open }),  // did not exist yet
+    mk('b1', 'a', { dueDate: '2026-09-20', completedDate: '2026-10-05' }),                         // old backlog, cleared in October
+    mk('b2', 'b', { dueDate: '2026-09-25', ...open }),                                             // old backlog, still open
+    mk('b3', 'a', { dueDate: '2026-09-10', completedDate: '2026-11-01' }),                         // old backlog, finished after October
+    mk('b4', 'b', { dueDate: '2026-09-05', completedDate: '2026-09-28' }),                         // finished before October: not backlog
+    mk('f1', 'a', { dueDate: '2026-11-15', completedDate: '2026-10-18' }),                         // finished ahead of its due date
+    mk('f2', 'b', { completedDate: '2026-10-22' })                                                 // no due date
+  ];
+  const report = (kind, tasks = oct) => compileReport({ period: resolvePeriod(kind, T), tasks, people, leaves: [], holidays: [], today: T, teamIds: ['t1'] });
+
+  test('last month: what was due, and what happened to it', () => {
+    const h = report('last_month').headline, p = report('last_month').plan;
+    assert.deepEqual([h.due, p.onTime, p.late, p.doneAfter, p.overdue, p.notYetDue], [6, 3, 1, 1, 1, 0]);
+    assert.equal(h.dueDone, 4); assert.equal(h.dueNotDone, 2); assert.equal(p.finishedBefore, 1);          // e6 was finished in September
+    assert.equal(Math.round(h.completionRate * 100), 67);
+    assert.deepEqual(report('last_month').plan.dueItems.map((x) => [x.task.id, x.outcome]),
+      [['e1', 'onTime'], ['e2', 'late'], ['e3', 'onTime'], ['e4', 'doneAfter'], ['e5', 'overdue'], ['e6', 'onTime']]);
+  });
+  test('cancelled tasks and tasks that did not exist yet are not counted as due', () => {
+    const ids = report('last_month').plan.dueItems.map((x) => x.task.id);
+    assert.ok(!ids.includes('e7') && !ids.includes('e8'));
+  });
+  test('last month: backlog brought in, cleared, and left at the end', () => {
+    const h = report('last_month').headline, p = report('last_month').plan;
+    assert.deepEqual([h.backlogIn, h.backlogCleared, p.backlogFromBefore, p.backlogFromPeriod, h.backlogEnd], [3, 1, 2, 2, 4]);
+    assert.deepEqual(p.endItems.map((x) => [x.task.id, x.origin]), [['b3', 'before'], ['b2', 'before'], ['e4', 'period'], ['e5', 'period']]);
+    assert.equal(p.endItems.find((x) => x.task.id === 'b2').daysLate, 36);        // due 25 Sep, counted to 31 Oct
+    assert.equal(p.endItems.find((x) => x.task.id === 'b3').stillOpen, false);
+    assert.equal(p.endItems.find((x) => x.task.id === 'e5').stillOpen, true);
+  });
+  test('the numbers add up: brought in - cleared + new = at the end', () => {
+    const { backlogIn, backlogCleared, backlogEnd } = report('last_month').headline, p = report('last_month').plan;
+    assert.equal(backlogIn - backlogCleared + p.backlogFromPeriod, backlogEnd);
+  });
+  test('completed tasks split into due in the period, old backlog cleared, and ahead / no due date', () => {
+    const r = report('last_month');
+    assert.deepEqual(r.completedMix, { dueInPeriod: 3, backlog: 1, ahead: 2 });
+    assert.equal(r.completedMix.dueInPeriod + r.completedMix.backlog + r.completedMix.ahead, r.headline.completed);
+  });
+  test('per person', () => {
+    const a = report('last_month').people.find((x) => x.person.id === 'a'), b = report('last_month').people.find((x) => x.person.id === 'b');
+    assert.deepEqual([a.due, a.dueDone, a.backlogEnd, a.backlogIn], [3, 2, 2, 2]);
+    assert.deepEqual([b.due, b.dueDone, b.backlogEnd, b.backlogIn], [3, 2, 2, 1]);
+  });
+  test('this month (still running): due today is not overdue; counts are up to today', () => {
+    const nov = [
+      mk('n1', 'a', { dueDate: '2026-11-02', ...open }),                              // overdue
+      mk('n2', 'a', { dueDate: '2026-11-10', ...open }),                              // not yet due
+      mk('n3', 'b', { dueDate: '2026-11-03', ...open }),                              // due today: not yet overdue
+      mk('n4', 'b', { dueDate: '2026-11-02', completedDate: '2026-11-02' }),          // on time
+      mk('n5', 'a', { dueDate: '2026-11-01', completedDate: '2026-11-03' }),          // late
+      mk('o1', 'a', { dueDate: '2026-10-28', ...open }),                              // backlog from last month
+      mk('o2', 'b', { dueDate: '2026-10-20', completedDate: '2026-11-03' })           // backlog cleared today
+    ];
+    const r = report('this_month', nov), p = r.plan;
+    assert.deepEqual([p.due, p.onTime, p.late, p.overdue, p.notYetDue, p.doneAfter], [5, 1, 1, 1, 2, 0]);
+    assert.deepEqual([r.headline.backlogIn, r.headline.backlogCleared, r.headline.backlogEnd], [2, 1, 2]);   // o1 + n1
+    assert.equal(r.headline.overdueNow, 2);                                                                      // the same two tasks the report calls overdue today
+    assert.equal(r.headline.backlogEnd, r.headline.overdueNow);                                                  // while running, backlog at the end = overdue today
+  });
+  test('for a finished period the backlog at its end is the position then, not today', () => {
+    const r = report('last_month');
+    assert.equal(r.headline.overdueNow, 3);                                  // e5, b2 and e8 are open now (e8 was only created after October)
+    assert.equal(r.headline.backlogEnd, 4);                                  // b3 and e4 were finished after October
+  });
+  test('an empty period has no rates and a zero backlog', () => {
+    const r = compileReport({ period: resolvePeriod('last_month', T), tasks: [], people, leaves: [], holidays: [], today: T });
+    assert.equal(r.headline.due, 0); assert.equal(r.headline.completionRate, null); assert.equal(r.headline.backlogEnd, 0);
+  });
+  test('outcome labels exist for every outcome', () => {
+    for (const k of ['onTime', 'late', 'doneAfter', 'overdue', 'notYetDue']) assert.ok(OUTCOME_LABEL[k]);
   });
 });

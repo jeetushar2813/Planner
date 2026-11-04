@@ -4,9 +4,10 @@
 import { LEAVE_TYPE_LABEL } from './model.js';
 import { wasOnTime } from './metrics.js';
 import { daysBetween } from './util.js';
-import { daysToFinish } from './report.js';
+import { daysToFinish, OUTCOME_LABEL } from './report.js';
 
 const head = (cells) => cells.map((v) => ({ v, s: 'head' }));
+const planDone = (p) => (p ? p.finishedByEnd : null);
 const round1 = (n) => (n === null || n === undefined ? null : Math.round(n * 10) / 10);
 
 export function reportSheets(model, lookup) {
@@ -28,6 +29,13 @@ export function reportSheets(model, lookup) {
       [],
       [],
       head(['Measure', 'This period', 'Previous period', 'Change']),
+      line('Tasks due in the period', h.due, h.duePrev),
+      line('...done by the end of the period', h.dueDone, planDone(model.planPrev)),
+      line('...of those, done on time', h.dueOnTime, model.planPrev?.onTime),
+      line('Share of due tasks done', h.completionRate, h.completionRatePrev, 'pct'),
+      ['Backlog brought in', h.backlogIn, null, null],
+      ['Backlog cleared in the period', h.backlogCleared, null, null],
+      line(model.period.inProgress ? 'Backlog today' : 'Backlog at the end of the period', h.backlogEnd, h.backlogEndPrev),
       line('Tasks completed', h.completed, h.completedPrev),
       line('Finished on time', h.onTimeRate, h.onTimeRatePrev, 'pct'),
       line('Checklist steps done', h.steps, h.stepsPrev),
@@ -42,6 +50,9 @@ export function reportSheets(model, lookup) {
       model.quietest ? ['Quietest', `${model.quietest.label} (${model.quietest.total} completed)`] : [],
       [],
       [{ v: 'How the numbers are worked out', s: 'bold' }],
+      ['Due in the period: tasks whose due date is in the period (cancelled tasks left out), judged at the end of the period, or today if it is still running.'],
+      ['Backlog: past their due date and not finished. Brought in = due before the period and not finished before it. At the end = brought in and still not finished, plus tasks due in the period not finished by its end.'],
+      ['Backlog is worked out from due and completed dates; the app keeps no history of status changes, so a task reopened or cancelled later cannot be placed exactly.'],
       ['Completed: tasks that reached a Done status, counted on the day they were completed.'],
       ['On time: completed on or before the due date. A task with no due date counts as on time.'],
       ['Steps done: checklist steps ticked in the period, credited to the person who ticked them (on their own task or someone else\'s).'],
@@ -54,11 +65,11 @@ export function reportSheets(model, lookup) {
 
   // ---- People
   sheets.push({
-    name: 'People', widths: [24, 10, 10, 8, 14, 10, 12, 12, 12, 10, 11, 12, 12, 10, 10, 10], header: 0,
+    name: 'People', widths: [24, 10, 10, 12, 10, 10, 8, 14, 10, 12, 12, 12, 10, 11, 12, 12, 10, 10, 10], header: 0,
     rows: [
-      head(['Person', 'Completed', 'On time', 'Late', 'Finished on time', 'Avg days to finish', 'Steps done', 'Steps on others tasks', 'Steps waiting', 'Rework', 'Created',
+      head(['Person', 'Due in period', 'Done of due', 'Backlog at end', 'Completed', 'On time', 'Late', 'Finished on time', 'Avg days to finish', 'Steps done', 'Steps on others tasks', 'Steps waiting', 'Rework', 'Created',
         'Open today', 'Overdue today', ...(model.scopeKind === 'project' ? [] : ['Leave days', 'Sick days', 'Annual days'])]),
-      ...model.people.map((r) => [r.person.name, r.done, r.onTime, r.late, { v: r.rate, s: 'pct' }, { v: round1(r.avgDays), s: 'dec' },
+      ...model.people.map((r) => [r.person.name, r.due, r.dueDone, r.backlogEnd, r.done, r.onTime, r.late, { v: r.rate, s: 'pct' }, { v: round1(r.avgDays), s: 'dec' },
         r.stepsDone, r.stepsHelped, r.stepsWaiting,
         r.rework, r.created, r.openNow, r.overdueNow,
         ...(model.scopeKind === 'project' ? [] : [r.leaveDays, r.leaveByType.sick || 0, r.leaveByType.annual || 0])])
@@ -77,6 +88,23 @@ export function reportSheets(model, lookup) {
     name: 'Over time', widths: [16, 16, 10, 11, 10, 8], header: 0,
     rows: [head(['From', 'To', 'Created', 'Completed', 'On time', 'Late']),
       ...model.buckets.map((b) => [{ v: b.start, s: 'date' }, { v: b.end, s: 'date' }, b.created, b.total, b.onTime, b.late])]
+  });
+
+  // ---- Due in the period
+  sheets.push({
+    name: 'Due in period', widths: [48, 20, 18, 22, 14, 24, 14], header: 0,
+    rows: [head(['Task', 'Owner', 'Team', 'Project', 'Due date', 'What happened', 'Completed']),
+      ...model.plan.dueItems.map((x) => [x.task.title, lookup.user(x.task.ownerId), lookup.team(x.task.teamId), lookup.project(x.task.projectId),
+        { v: x.task.dueDate, s: 'date' }, OUTCOME_LABEL[x.outcome], { v: x.task.statusCategory === 'done' ? x.task.completedDate : null, s: 'date' }])]
+  });
+
+  // ---- Backlog
+  sheets.push({
+    name: 'Backlog', widths: [48, 20, 18, 22, 14, 20, 20, 16], header: 0,
+    rows: [head(['Task', 'Owner', 'Team', 'Project', 'Due date', 'Days late at the end', 'From', 'Finished?']),
+      ...model.plan.endItems.map((x) => [x.task.title, lookup.user(x.task.ownerId), lookup.team(x.task.teamId), lookup.project(x.task.projectId),
+        { v: x.task.dueDate, s: 'date' }, x.daysLate, x.origin === 'before' ? 'Before the period' : 'Due in the period',
+        x.stillOpen ? 'Still open' : `Yes, ${x.task.completedDate}`])]
   });
 
   // ---- Completed

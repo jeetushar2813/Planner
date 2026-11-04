@@ -6,9 +6,9 @@
 // leave are loaded once per period and kept for 5 minutes. Team and person filters are applied
 // on screen without reading again.
 
-import { h, add, clear, todayISO, fmtDate, fmtDateLong, daysBetween, toDate } from '../core/util.js';
+import { h, add, clear, todayISO, fmtDate, fmtDateLong, daysBetween, toDate, addDays } from '../core/util.js';
 import { LEAVE_TYPE_LABEL, roleLabel } from '../core/model.js';
-import { PERIOD_KINDS, resolvePeriod, compileReport, compare } from '../core/report.js';
+import { PERIOD_KINDS, resolvePeriod, compileReport, compare, OUTCOME_LABEL } from '../core/report.js';
 import { reportSheets, reportFileName } from '../core/reportExport.js';
 import { buildXlsx, XLSX_MIME } from '../core/xlsx.js';
 import { wasOnTime, pct } from '../core/metrics.js';
@@ -67,24 +67,27 @@ export function renderReports(container) {
 
   // ------------------------------------------------------------------ loading
   const periodNow = () => resolvePeriod(f.kind, today, { from: f.from, to: f.to });
+  // Finished tasks are read from here. The previous period is needed for the comparison, and a month
+  // before the period catches tasks that were due in it but finished early.
+  const finishedFrom = (period) => { const early = addDays(period.from, -31); return period.prev.from < early ? period.prev.from : early; };
 
   async function load(force = false) {
     const period = periodNow();
-    const key = `${user.id}|${f.projectId || ''}|${period.prev.from}`;
+    const key = `${user.id}|${f.projectId || ''}|${finishedFrom(period)}`;
     if (!force && cache && cache.key === key && Date.now() - cache.at < CACHE_MINUTES * 60000) {
       data = cache.data; loading = false; failure = null; paint(); return;
     }
     loading = true; failure = null; paint();
     try {
       if (f.projectId) {
-        const [open, fin] = await Promise.all([loadProjectTasks(f.projectId), loadProjectDone(f.projectId, period.prev.from)]);
+        const [open, fin] = await Promise.all([loadProjectTasks(f.projectId), loadProjectDone(f.projectId, finishedFrom(period))]);
         data = { tasks: [...new Map([...open, ...fin].map((x) => [x.id, x])).values()], leaves: [], holidays: [], at: Date.now() };
         cache = { key, at: data.at, data };
         loading = false; paint(); return;
       }
       const perTeam = await Promise.all(teams.map(async (t) => {
         const [open, fin, leaves] = await Promise.all([
-          loadOpenTasks({ teamId: t.id }), loadFinished({ teamId: t.id, fromISO: period.prev.from }), loadTeamLeave(t.id, period.prev.from)
+          loadOpenTasks({ teamId: t.id }), loadFinished({ teamId: t.id, fromISO: finishedFrom(period) }), loadTeamLeave(t.id, period.prev.from)
         ]);
         return { open, fin, leaves };
       }));
@@ -219,12 +222,20 @@ export function renderReports(container) {
           period.inProgress ? ` · still running, figures are up to ${fmtDate(period.asOf)}` : ''),
         h('p', { class: 'muted small' }, `Prepared ${fmtDateLong(today)} by ${user.name} (${roleLabel(user)})`)),
       tiles(hd),
+      section(`Due in this period (${hd.due})`, planBlock()),
+      section(`Backlog${period.inProgress ? ' so far' : ' at the end of the period'} (${hd.backlogEnd})`, backlogBlock()),
       section('Progress over the period', progressBlock()),
       section(f.personId ? 'Scorecard' : 'Individual scorecards', scorecards()),
       !isProject && model.projects.length ? section('By project', projectsBlock()) : null,
       section(`Tasks completed (${hd.completed})`, taskList('done', model.completed, ['Task', 'Owner', 'Project', 'Due', 'Completed', 'On time'],
         (t) => [titleCell(t), userName(t.ownerId), projectName(t.projectId) || '–', t.dueDate ? fmtDate(t.dueDate) : '–', fmtDate(t.completedDate),
           wasOnTime(t) ? 'Yes' : `Late by ${daysBetween(t.dueDate, t.completedDate)}d`], 'Nothing was completed in this period.')),
+      section(`Tasks due in this period (${hd.due})`, taskList('due', model.plan.dueItems, ['Task', 'Owner', 'Due', 'What happened', 'Completed'],
+        (x) => [titleCell(x.task), userName(x.task.ownerId), fmtDate(x.task.dueDate), OUTCOME_LABEL[x.outcome], x.task.statusCategory === 'done' ? fmtDate(x.task.completedDate) : '–'],
+        'No tasks were due in this period.')),
+      section(`Backlog list (${hd.backlogEnd})`, taskList('backlog', model.plan.endItems, ['Task', 'Owner', 'Due', 'Days late at the end', 'From', 'Finished?'],
+        (x) => [titleCell(x.task), userName(x.task.ownerId), fmtDate(x.task.dueDate), `${x.daysLate}d`, x.origin === 'before' ? 'Before the period' : 'Due in the period',
+          x.stillOpen ? 'Still open' : `Yes, on ${fmtDate(x.task.completedDate)}`], 'Nothing was overdue.')),
       section(`Steps completed (${hd.steps})`, taskList('steps', model.steps, ['Step', 'Task', 'Done by', 'Task owner', 'Done on'],
         (x) => [x.step.text, titleCell(x.task), userName(x.by), userName(x.task.ownerId), fmtDate(x.date)], 'No checklist steps were ticked in this period.')),
       section(`Still open today (${hd.openNow})`, taskList('open', model.open, ['Task', 'Owner', 'Status', 'Due', 'Overdue'],
@@ -236,6 +247,8 @@ export function renderReports(container) {
         h('ul', null,
           h('li', null, 'Completed: tasks that reached a Done status, counted on the day they were completed.'),
           h('li', null, 'Finished on time: completed on or before the due date. A task with no due date counts as on time.'),
+          h('li', null, 'Due in this period: tasks whose due date falls in the period (cancelled tasks are left out). Each is judged at the end of the period, or today if the period is still running: done on time, done late, done only after the period ended, overdue, or not yet due.'),
+          h('li', null, 'Backlog: tasks past their due date and not finished. Brought in = due before the period began and not finished before it began. At the end = brought in and still not finished, plus tasks due in the period that were not finished by its end. It is worked out from due and completed dates. The app keeps no history of status changes, so a task that was reopened or cancelled later cannot be placed exactly. Tasks without a due date are never backlog.'),
           h('li', null, 'Steps done: checklist steps ticked in the period. The credit goes to the person who ticked the step, on their own task or on someone else’s. Steps given to a person but not yet ticked are shown when you point at the figure.'),
           h('li', null, 'Created: tasks added in the period. Cancelled tasks are not included.'),
           h('li', null, 'Open and overdue are the position today. The app does not keep history, so they are not “as at” the end of the period.'),
@@ -273,6 +286,43 @@ export function renderReports(container) {
       tile('Overdue today', hd.overdueNow, null, hd.overdueNow ? 'need attention' : 'nothing overdue'));
   }
 
+  // -------------------------------------------------------- due in the period
+  const mini = (label, value, note, tone = '') => h('div', { class: 'tile' },
+    h('span', { class: 'tile-label' }, label), h('span', { class: 'tile-value' }, String(value)),
+    h('span', { class: 'tile-note' + (tone ? ' cmp-' + tone : ' muted') }, note));
+
+  function planBlock() {
+    const p = model.plan, hd = model.headline, running = model.period.inProgress, mix = model.completedMix;
+    const rate = hd.completionRate === null ? '–' : pct(hd.completionRate);
+    const prevNote = hd.completionRatePrev === null ? 'no earlier figure' : `${pct(hd.completionRatePrev)} in the previous period`;
+    return h('div', null,
+      h('p', { class: 'muted' }, running
+        ? `Tasks with a due date between ${fmtDate(model.period.from)} and ${fmtDate(model.period.to)}, and what has happened to them up to ${fmtDate(model.period.asOf)}.`
+        : `Tasks with a due date between ${fmtDate(model.period.from)} and ${fmtDate(model.period.to)}, and what had happened to them by the end of the period.`),
+      h('div', { class: 'tiles report-tiles' },
+        mini('Due in the period', p.due, 'cancelled tasks not counted'),
+        mini('Done on time', p.onTime, p.due ? `${pct(p.onTime / p.due)} of those due` : '', ''),
+        mini('Done late', p.late, 'finished after the due date'),
+        mini('Done by the end', `${p.finishedByEnd} of ${p.due}`, `${rate} · ${prevNote}`),
+        mini('Not done', hd.dueNotDone,
+          p.due ? `${p.overdue} overdue${p.notYetDue ? `, ${p.notYetDue} not yet due` : ''}${p.doneAfter ? `, ${p.doneAfter} finished after the period` : ''}` : '', p.overdue || p.doneAfter ? 'bad' : '')),
+      h('p', { class: 'muted small' },
+        `Of the ${hd.completed} task${hd.completed === 1 ? '' : 's'} completed in the period: ${mix.dueInPeriod} ${mix.dueInPeriod === 1 ? 'was' : 'were'} due in it, ${mix.backlog} cleared older backlog, and ${mix.ahead} ${mix.ahead === 1 ? 'was' : 'were'} finished ahead of the due date or had no due date.${p.finishedBefore ? ` ${p.finishedBefore} more task${p.finishedBefore === 1 ? '' : 's'} due in the period ${p.finishedBefore === 1 ? 'was' : 'were'} finished before it began, so ${p.finishedBefore === 1 ? 'it is' : 'they are'} counted above but not as completed in the period.` : ''}`));
+  }
+
+  function backlogBlock() {
+    const p = model.plan, hd = model.headline;
+    return h('div', null,
+      h('p', { class: 'muted' }, 'Tasks past their due date and not finished. Older backlog is carried in; tasks due in the period that were not finished by its end are added.'),
+      h('div', { class: 'tiles report-tiles' },
+        mini('Brought in', hd.backlogIn, `due before ${fmtDate(model.period.from)}, not finished`),
+        mini('Cleared in the period', hd.backlogCleared, hd.backlogIn ? `${pct(hd.backlogCleared / hd.backlogIn)} of what was brought in` : 'nothing to clear', hd.backlogCleared ? 'good' : ''),
+        mini('Added from this period', p.backlogFromPeriod, 'due in the period, not finished by its end', p.backlogFromPeriod ? 'bad' : ''),
+        mini(model.period.inProgress ? 'Backlog today' : 'Backlog at the end', hd.backlogEnd,
+          hd.backlogEndPrev === undefined ? '' : `${hd.backlogEndPrev} at the end of the previous period`, hd.backlogEnd ? 'bad' : 'good')),
+      h('p', { class: 'muted small' }, `${hd.backlogIn} brought in − ${hd.backlogCleared} cleared + ${p.backlogFromPeriod} added = ${hd.backlogEnd}. ${hd.overdueNow !== hd.backlogEnd ? `Overdue today is ${hd.overdueNow} because the position has changed since ${fmtDate(model.period.asOf)}.` : ''}`));
+  }
+
   // ----------------------------------------------------------------- progress
   function progressBlock() {
     const b = model.buckets;
@@ -300,10 +350,12 @@ export function renderReports(container) {
     if (!rows.length) return noData('No people in this view.');
     const num = (n) => (n === null ? '–' : (Math.round(n * 10) / 10).toString());
     return h('div', { class: 'table-wrap' }, h('table', { class: 'tasks compact report-table' },
-      h('thead', null, h('tr', null, ['Person', 'Completed', 'On time', 'Steps done', 'Days to finish', 'Rework', 'Created', 'Open today', 'Overdue today', ...(model.scopeKind === 'project' ? [] : ['Leave days'])]
+      h('thead', null, h('tr', null, ['Person', 'Due', 'Done of due', 'Completed', 'On time', 'Steps done', 'Days to finish', 'Rework', 'Created', 'Open today', 'Overdue today', 'Backlog', ...(model.scopeKind === 'project' ? [] : ['Leave days'])]
         .map((x, i) => h('th', { class: i ? 'num' : '' }, x)))),
       h('tbody', null, rows.map((r) => h('tr', null,
         h('td', null, r.person.name),
+        h('td', { class: 'num' }, r.due),
+        h('td', { class: 'num', title: r.due ? `${r.dueOnTime} on time` : '' }, r.due ? `${r.dueDone} of ${r.due}` : '–'),
         h('td', { class: 'num' }, r.done),
         h('td', { class: 'num' }, r.done ? `${pct(r.rate)}${r.late ? ` (${r.late} late)` : ''}` : '–'),
         h('td', { class: 'num', title: `${r.stepsHelped} on other people's tasks${r.stepsWaiting ? `, ${r.stepsWaiting} more waiting` : ''}` },
@@ -314,6 +366,7 @@ export function renderReports(container) {
         h('td', { class: 'num' }, r.created),
         h('td', { class: 'num' }, r.openNow),
         h('td', { class: 'num' }, r.overdueNow ? h('span', { class: 'due due-overdue' }, r.overdueNow) : 0),
+        h('td', { class: 'num', title: 'Past due and not finished at the end of the period' }, r.backlogEnd ? h('span', { class: 'due due-overdue' }, r.backlogEnd) : 0),
         model.scopeKind === 'project' ? null : h('td', { class: 'num' }, r.leaveDays))))));
   }
 

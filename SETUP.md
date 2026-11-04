@@ -295,3 +295,15 @@ Until then, avoid deleting the Firebase project and keep a note of who has conso
 - **Alert lead time:** to change the 3 days, add `keyDateAlertDays: 5` to `appSettings` in `js/config.js`.
 - **Cost:** one small read of the key dates, kept for 10 minutes and shared by Home, Calendar, Weekly summary and the bell. Writing one
   date is one document plus one activity-log entry.
+
+## Reports: due in the period and backlog
+
+- No rules change and no new index. Reports now also read finished tasks from one month before the period (before, from the start of the
+  previous period), so a task that was due in the period but finished early is still found. This can add a few reads on a busy team.
+- **Due in this period:** tasks whose due date is in the period (cancelled tasks left out), judged at the end of the period, or today if it
+  is still running: done on time, done late, done only after the period ended, overdue, or not yet due.
+- **Backlog:** past their due date and not finished. *Brought in* = due before the period and not finished before it. *At the end* = brought
+  in and still not finished, plus tasks due in the period not finished by its end (brought in - cleared + added = at the end).
+- The app keeps no history of status changes, so the backlog is worked out from due and completed dates. A task that was reopened or
+  cancelled after the period cannot be placed exactly. Tasks without a due date are never counted as due or as backlog.
+- Same figures appear in the Excel file (Summary lines, People columns, and new "Due in period" and "Backlog" sheets).

@@ -6,6 +6,14 @@
 //  - On time: completed on or before its due date (no due date counts as on time).
 //  - Steps done: checklist steps ticked in the period, credited to the person who ticked them
 //    (on their own task or someone else's). Steps waiting: steps given to a person, not yet done.
+//  - Due in the period: tasks whose due date falls in the period (cancelled ones left out). Each one is
+//    sorted by what happened, judged at the end of the period (or today, if it is still running):
+//    done on time, done late, done only after the period ended, overdue, or not yet due.
+//  - Backlog: tasks past their due date and not finished. "Brought in" = due before the period began and
+//    not finished before it began. "Backlog at the end" = brought in and still not finished, plus tasks
+//    due in the period that were not finished by its end. It is worked out from due and completed dates,
+//    so it is exact for tasks that stayed in their status, but a task that was reopened or cancelled
+//    later cannot be placed exactly (the app keeps no history of status changes).
 //  - Created: tasks added in the period. Tasks that were cancelled ("closed") are not included.
 //  - Open now / Overdue now: the position today. The app does not keep history, so this is
 //    never "as at the end of the period".
@@ -147,6 +155,57 @@ function leaveInRange(leaves, from, to, people, holidays) {
   return rows;
 }
 
+export const OUTCOME_LABEL = {
+  onTime: 'Done on time', late: 'Done late', doneAfter: 'Done after the period', overdue: 'Overdue', notYetDue: 'Not yet due'
+};
+
+// Planned work and backlog for a list of tasks over one period. See the notes at the top of this file.
+export function planOf(list, period, today) {
+  const { from, to } = period;
+  const cutoff = period.asOf;
+  const isDone = (t) => t.statusCategory === 'done';
+  const live = list.filter((t) => isDone(t) || isOpenTask(t));                // cancelled and archived-while-open tasks are left out
+  const existed = (t) => { const c = dateOf(t.createdAt); return !c || c <= cutoff; };
+  const outcomeOf = (t) => {
+    if (isDone(t)) {
+      const c = t.completedDate || '';
+      if (c > cutoff) return 'doneAfter';
+      return c <= t.dueDate ? 'onTime' : 'late';
+    }
+    return t.dueDate < today ? 'overdue' : 'notYetDue';
+  };
+
+  const dueItems = live.filter((t) => t.dueDate && inRange(t.dueDate, from, to) && existed(t))
+    .map((t) => ({ task: t, outcome: outcomeOf(t) }));
+  const count = (k) => dueItems.filter((x) => x.outcome === k).length;
+
+  // Due before the period began and not finished before it began.
+  const broughtIn = live.filter((t) => t.dueDate && t.dueDate < from && existed(t) && !(isDone(t) && (t.completedDate || '') < from));
+  const cleared = broughtIn.filter((t) => isDone(t) && (t.completedDate || '') <= cutoff);
+  const stuck = broughtIn.filter((t) => !cleared.includes(t));
+
+  const endItems = [
+    ...stuck.map((t) => ({ task: t, origin: 'before' })),
+    ...dueItems.filter((x) => x.outcome === 'doneAfter' || x.outcome === 'overdue').map((x) => ({ task: x.task, origin: 'period' }))
+  ].map((x) => ({ ...x, daysLate: daysBetween(x.task.dueDate, cutoff), stillOpen: !isDone(x.task) }))
+    .sort((a, b) => a.task.dueDate.localeCompare(b.task.dueDate) || a.task.title.localeCompare(b.task.title));
+
+  const finishedByEnd = count('onTime') + count('late');
+  return {
+    due: dueItems.length, onTime: count('onTime'), late: count('late'), doneAfter: count('doneAfter'),
+    overdue: count('overdue'), notYetDue: count('notYetDue'),
+    finishedByEnd,
+    finishedBefore: dueItems.filter((x) => x.task.statusCategory === 'done' && (x.task.completedDate || '') < from).length,   // finished before the period began
+    completionRate: dueItems.length ? finishedByEnd / dueItems.length : null,
+    onTimeRate: dueItems.length ? count('onTime') / dueItems.length : null,
+    broughtIn: broughtIn.length, cleared: cleared.length,
+    backlogEnd: endItems.length,
+    backlogFromBefore: stuck.length, backlogFromPeriod: endItems.length - stuck.length,
+    dueItems: dueItems.sort((a, b) => a.task.dueDate.localeCompare(b.task.dueDate) || a.task.title.localeCompare(b.task.title)),
+    endItems
+  };
+}
+
 // Everything on the report, for one scope. `tasks` is every task loaded for the scope
 // (open ones and those finished since the previous period began), unique by id.
 export function compileReport({ period, tasks, people, leaves, holidays, today, projects = [], teamIds = [] }) {
@@ -179,6 +238,16 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
   const stepsWaiting = (id) => tasks.filter(isOpenTask)
     .reduce((n, t) => n + (t.checklist || []).filter((s) => !s.done && s.assigneeId === id).length, 0);
 
+  // Planned work (due in the period) and backlog
+  const plan = planOf(mine, period, today);
+  const planPrev = planOf(mine, { ...prev, asOf: prev.to }, today);
+  // What the completed tasks were: due in the period, old backlog cleared, or finished ahead of their due date / with no due date.
+  const completedMix = {
+    dueInPeriod: doneNow.filter((t) => t.dueDate && inRange(t.dueDate, from, to)).length,
+    backlog: doneNow.filter((t) => t.dueDate && t.dueDate < from).length,
+    ahead: doneNow.filter((t) => !t.dueDate || t.dueDate > to).length
+  };
+
   // Per bucket
   const buckets = bucketsFor(period).map((b) => {
     const d = doneNow.filter((t) => t.completedDate >= b.start && t.completedDate <= b.end);
@@ -198,6 +267,7 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
     const cyc = d.map(daysToFinish).filter((x) => x !== null);
     const myOpen = open.filter((t) => t.ownerId === p.id);
     const myLeave = leaveNow.filter((r) => r.leave.userId === p.id);
+    const myPlan = planOf(mine.filter((t) => t.ownerId === p.id), period, today);
     const byType = Object.fromEntries(LEAVE_TYPES.map((k) => [k, myLeave.filter((r) => r.leave.type === k).reduce((n, r) => n + r.days, 0)]));
     return {
       person: p, done: d.length, onTime: on, late: d.length - on, rate: d.length ? on / d.length : null,
@@ -206,6 +276,7 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
       stepsDone: stepsNow.filter((x) => x.by === p.id).length,
       stepsHelped: stepsNow.filter((x) => x.by === p.id && x.task.ownerId !== p.id).length,   // on someone else's task
       stepsWaiting: stepsWaiting(p.id),
+      due: myPlan.due, dueDone: myPlan.finishedByEnd, dueOnTime: myPlan.onTime, backlogEnd: myPlan.backlogEnd, backlogIn: myPlan.broughtIn,
       leaveDays: sumDays(myLeave), leaveByType: byType
     };
   }).sort((a, b) => a.person.name.localeCompare(b.person.name));
@@ -241,8 +312,13 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
       rework: reworkOf(doneNow), reworkPrev: reworkOf(donePrev),
       leaveDays: sumDays(leaveNow), leaveDaysPrev: sumDays(leavePrev),
       openNow: open.length, overdueNow: overdue.length,
-      steps: stepsNow.length, stepsPrev: stepsPrev.length
+      steps: stepsNow.length, stepsPrev: stepsPrev.length,
+      due: plan.due, dueDone: plan.finishedByEnd, dueOnTime: plan.onTime, dueLate: plan.late,
+      dueNotDone: plan.doneAfter + plan.overdue + plan.notYetDue,
+      completionRate: plan.completionRate, completionRatePrev: planPrev.completionRate, duePrev: planPrev.due,
+      backlogIn: plan.broughtIn, backlogCleared: plan.cleared, backlogEnd: plan.backlogEnd, backlogEndPrev: planPrev.backlogEnd
     },
+    plan, planPrev, completedMix,
     steps: stepsNow.sort((a, b) => a.date.localeCompare(b.date) || a.step.text.localeCompare(b.step.text)),
     buckets, busiest, quietest,
     people: peopleRows, projects: projectRows,
