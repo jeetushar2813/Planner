@@ -786,6 +786,69 @@ describe('holidays', () => {
   });
 });
 
+// ---------------------------------------------------------------- key dates
+describe('key dates', () => {
+  const keyDoc = (teamId, over = {}) => ({
+    title: 'Semester 1 starts', startDate: '2026-09-01', endDate: '2026-09-01', teamId, category: 'term', yearly: true, active: true,
+    createdBy: 'x', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...over
+  });
+  const create = (actor, kid, teamId, over = {}) => logged(actor, {
+    path: `keyDates/${kid}`, kind: 'create', type: 'keydate', entityId: kid, teamId, data: keyDoc(teamId, { createdBy: actor, ...over })
+  });
+  const change = (actor, kid, teamId, data) => logged(actor, {
+    path: `keyDates/${kid}`, kind: 'update', type: 'keydate', entityId: kid, teamId, data: { updatedAt: serverTimestamp(), ...data }
+  });
+  test('everyone signed in reads key dates, signed-out people do not', async () => {
+    await assertSucceeds(getDocs(collection(as('memA1'), 'keyDates')));
+    await assertFails(getDocs(collection(env.unauthenticatedContext().firestore(), 'keyDates')));
+    await assertFails(getDocs(collection(as('gone'), 'keyDates')));
+  });
+  test('the Director adds one for everyone or for any team; a Superuser too', async () => {
+    await assertSucceeds(create('dir', id('kd'), null));
+    await assertSucceeds(create('dir', id('kd'), 'teamB'));
+    await assertSucceeds(create('su', id('kd'), null));
+    await assertFails(create('notSu', id('kd'), null));
+  });
+  test('a leader or manager adds one for their own team only, never for everyone', async () => {
+    await assertSucceeds(create('ldrA', id('kd'), 'teamA'));
+    await assertSucceeds(create('mgrA', id('kd'), 'teamA'));
+    await assertFails(create('ldrA', id('kd'), 'teamB'));
+    await assertFails(create('ldrA', id('kd'), null));
+  });
+  test('members and assistant leaders cannot add key dates', async () => {
+    await assertFails(create('memA1', id('kd'), 'teamA'));
+    await assertFails(create('asstA', id('kd'), 'teamA'));
+  });
+  test('the form is checked: title, dates, type, length of note, who made it', async () => {
+    await assertFails(create('dir', id('kd'), null, { title: '' }));
+    await assertFails(create('dir', id('kd'), null, { title: 'x'.repeat(101) }));
+    await assertFails(create('dir', id('kd'), null, { endDate: '2026-08-31' }));
+    await assertFails(create('dir', id('kd'), null, { category: 'party' }));
+    await assertFails(create('dir', id('kd'), null, { note: 'x'.repeat(501) }));
+    await assertFails(create('dir', id('kd'), null, { createdBy: 'someoneElse' }));
+    await assertSucceeds(create('dir', id('kd'), null, { note: 'Bring the register', endDate: '2026-09-05' }));
+  });
+  test('a key date must come with its activity-log entry', async () => {
+    const db = as('dir');
+    await assertFails(setDoc(doc(db, 'keyDates', id('kd')), { ...keyDoc(null, { createdBy: 'dir' }), lastLogId: 'nolog' }));
+  });
+  test('editing and switching off: only someone who may manage that team; never deleting', async () => {
+    await create('ldrA', 'kdE', 'teamA');
+    await assertSucceeds(change('ldrA', 'kdE', 'teamA', { title: 'Semester 1 begins' }));
+    await assertSucceeds(change('dir', 'kdE', 'teamA', { active: false }));
+    await assertFails(change('ldrB', 'kdE', 'teamA', { title: 'x' }));
+    await assertFails(change('memA1', 'kdE', 'teamA', { title: 'x' }));
+    await assertFails(change('ldrA', 'kdE', 'teamA', { teamId: null }));                 // cannot widen it to everyone
+    await assertFails(change('ldrA', 'kdE', 'teamA', { createdBy: 'ldrA2' }));
+    await assertFails(deleteDoc(doc(as('dir'), 'keyDates', 'kdE')));
+  });
+  test('a company-wide key date can be changed by the Director only', async () => {
+    await create('dir', 'kdAll', null);
+    await assertSucceeds(change('dir', 'kdAll', null, { title: 'Semester 1 begins' }));
+    await assertFails(change('ldrA', 'kdAll', null, { title: 'x' }));
+  });
+});
+
 // ------------------------------------------------------------ project owners
 // memA1 (a plain member of team A) owns project "pOwned". Work in it is held by people in
 // team B and team C, so the owner reaches across teams without being a leader there.

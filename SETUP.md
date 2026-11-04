@@ -278,3 +278,20 @@ Until then, avoid deleting the Firebase project and keep a note of who has conso
   at a glance, people, finished, overdue, waiting for review, blocked or paused, due soon, who is away. **Copy as text** puts it on
   the clipboard for a chat or email; **Save as PDF** opens the print window. The Notes box is not saved. Reads: each team's open
   tasks, the tasks finished that week and leave, kept for 5 minutes. No new index and no rules change for these two pages.
+  The summary also lists key dates in the next 14 days (see below).
+
+## Key dates (Semester starts, Exam week...)
+
+- **Publish `firestore.rules` again (needed for key dates).** They add a `keyDates` collection. Until the new rules are published,
+  saving a key date will be refused. Then run `npm run test:rules` on your Mac (new "key dates" tests).
+- **Who can add:** Team Leaders and Managers for their own team; the Director and Superusers for any team or for everyone. Members
+  and Assistant Team Leaders can see them but not add. Open **Calendar** and press **+ Key date** (or open a day and press
+  **+ Key date on this day**). Press a starred chip to edit it. **Remove** switches it off; it stays in the Activity log.
+- **Kinds:** one day, or a range (at most 60 days; add a second one for a longer period). **Repeats every year** shows it again each year on
+  the same month and day (29 February falls on 28 February in other years). If the real date moves one year, edit it.
+- **Where they show:** Calendar (a "Key dates" tick-box turns them off; they carry a star so colour is not the only clue), Home
+  ("Key dates ahead", next 30 days), the **Alerts** bell (once, from 3 days before until you press **Mark new as seen**), and the
+  Weekly summary (next 14 days). A team's own dates show only to people who can see that team.
+- **Alert lead time:** to change the 3 days, add `keyDateAlertDays: 5` to `appSettings` in `js/config.js`.
+- **Cost:** one small read of the key dates, kept for 10 minutes and shared by Home, Calendar, Weekly summary and the bell. Writing one
+  date is one document plus one activity-log entry.

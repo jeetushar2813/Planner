@@ -728,6 +728,59 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // ------------------------------------------------------------------ key dates
+    // Dates worth marking on the calendar that are not tasks and not days off: "Semester 1 starts",
+    // "Exam week", "Open day". A key date has a first day and a last day (the same day for a
+    // one-day date), a team (or null for everyone), and may come back every year. Everyone signed in
+    // can read them; the Director and Superuser write dates for everyone, Team Leaders and Managers
+    // write dates for their own team. They are switched off (active: false), never deleted.
+
+    match /keyDates/{keyDateId} {
+
+      function validKeyDate(d) {
+        return d.keys().hasAll([
+            'title', 'startDate', 'endDate', 'teamId', 'category', 'yearly', 'active',
+            'createdBy', 'createdAt', 'updatedAt', 'lastLogId'
+          ])
+          && d.title is string && d.title.size() > 0 && d.title.size() <= 100
+          && d.startDate is string && d.startDate.size() == 10
+          && d.endDate is string && d.endDate.size() == 10
+          && d.endDate >= d.startDate
+          && (d.teamId == null || d.teamId is string)
+          && d.category in ['term', 'exam', 'event', 'deadline', 'other']
+          && d.yearly is bool
+          && d.active is bool
+          && (!('note' in d) || d.note == null || (d.note is string && d.note.size() <= 500));
+      }
+
+      function mayManageKeyDate(teamId) {
+        return isDirector()
+          || (role() in ['manager', 'leader'] && teamId != null && inTeam(teamId));
+      }
+
+      allow get, list: if active();
+
+      allow create: if active()
+        && validKeyDate(request.resource.data)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && mayManageKeyDate(request.resource.data.teamId)
+        && logged('keydate', keyDateId, request.resource.data.lastLogId);
+
+      allow update: if active()
+        && validKeyDate(request.resource.data)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.lastLogId != resource.data.lastLogId
+        && mayManageKeyDate(resource.data.teamId)
+        && mayManageKeyDate(request.resource.data.teamId)
+        && logged('keydate', keyDateId, request.resource.data.lastLogId);
+
+      allow delete: if false;
+    }
+
     // ------------------------------------------------------------ leave entitlements
     //
     // One document per year (id = "2026"): the days everyone gets for each kind of leave, plus
@@ -781,7 +834,7 @@ service cloud.firestore {
           && d.actorId == request.auth.uid
           && d.actorRole == role()
           && d.action is string && d.action.size() <= 40
-          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy', 'template']
+          && d.entityType in ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy', 'template', 'keydate']
           && d.entityId is string
           && d.entityTitle is string && d.entityTitle.size() <= 300
           && (d.teamId == null || d.teamId is string)

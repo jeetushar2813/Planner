@@ -7,9 +7,10 @@
 import { h, add, clear, todayISO, fmtDate, fmtDateLong, daysBetween } from '../core/util.js';
 import { roleLabel } from '../core/model.js';
 import * as perm from '../core/perm.js';
-import { compileWeekly, resolveWeek, weeklyText, WEEK_CHOICES } from '../core/weekly.js';
+import { compileWeekly, resolveWeek, weeklyText, WEEK_CHOICES, KEY_AHEAD_DAYS } from '../core/weekly.js';
+import { whenText, KEY_CATEGORY_LABEL } from '../core/keydates.js';
 import { wasOnTime, pct } from '../core/metrics.js';
-import { state, myTeams, userName, statusName, loadOpenTasks, loadFinished, loadTeamLeave, loadHolidays } from '../core/store.js';
+import { state, myTeams, userName, statusName, loadOpenTasks, loadFinished, loadTeamLeave, loadHolidays, loadKeyDates } from '../core/store.js';
 import { toast, errorMessage, emptyState, spinner, select } from './components.js';
 import { openTaskPanel } from './taskform.js';
 
@@ -57,7 +58,7 @@ export function renderWeekly(container) {
         return { open, fin, leaves };
       }));
       const uniq = (lists) => [...new Map(lists.flat().map((x) => [x.id, x])).values()];
-      data = { tasks: uniq(perTeam.flatMap((x) => [x.open, x.fin])), leaves: uniq(perTeam.map((x) => x.leaves)), holidays: await loadHolidays(today), at: Date.now() };
+      data = { tasks: uniq(perTeam.flatMap((x) => [x.open, x.fin])), leaves: uniq(perTeam.map((x) => x.leaves)), holidays: await loadHolidays(today), keyDates: await loadKeyDates().catch(() => []), at: Date.now() };
       cache = { key, at: data.at, data };
     } catch (err) { failure = err; toast(errorMessage(err), 'error'); }
     loading = false; paint();
@@ -95,7 +96,8 @@ export function renderWeekly(container) {
     scopeText = text;
     model = compileWeekly({
       people, tasks: data.tasks.filter((t) => scopeIds.includes(t.teamId)), leaves: data.leaves.filter((l) => scopeIds.includes(l.teamId)),
-      holidays: data.holidays, week: week(), today
+      holidays: data.holidays, week: week(), today,
+      keyDates: (data.keyDates || []).filter((k) => !k.teamId || scopeIds.includes(k.teamId))
     });
     const hd = model.headline;
 
@@ -119,6 +121,8 @@ export function renderWeekly(container) {
         (t) => [titleCell(t), userName(t.ownerId), statusName(t.status), t.statusNote || (t.blockedBy?.length ? 'Waiting for another task' : '–')], 'Nothing is blocked or paused.')),
       section(`Due in the next 7 days (${hd.upcoming})`, taskTable(model.upcoming, ['Task', 'Owner', 'Due', 'Heads up'],
         (u) => [titleCell(u.task), userName(u.task.ownerId), fmtDate(u.task.dueDate), u.away ? 'Owner is away that day' : '–'], 'Nothing is due in the next 7 days.')),
+      section(`★ Key dates in the next ${KEY_AHEAD_DAYS} days (${hd.keys})`, taskTable(model.keys, ['Key date', 'When', 'Dates', 'Type'],
+        (o) => [h('a', { href: '#/calendar' }, o.kd.title), whenText(o), `${fmtDate(o.startDate)}${o.endDate !== o.startDate ? ' to ' + fmtDate(o.endDate) : ''}`, KEY_CATEGORY_LABEL[o.kd.category] || 'Other'], 'No key dates in the next two weeks.')),
       section(`Away in the next 2 weeks (${hd.away})`, taskTable(model.away, ['Person', 'From', 'To', 'Working days'],
         (a) => [a.person.name, fmtDate(a.leave.startDate), fmtDate(a.leave.endDate), a.days], 'Nobody is away.')),
       section('Notes', notes),
@@ -129,6 +133,7 @@ export function renderWeekly(container) {
           h('li', null, 'Steps ticked: checklist steps ticked in the week, credited to the person who ticked them.'),
           h('li', null, 'Overdue, waiting for review, blocked and due soon are the position today. The app does not keep history, so they are not “as at” the end of the week.'),
           h('li', null, 'Blocked or paused: tasks in a paused status, or waiting for another task that is not finished.'),
+          h('li', null, 'Key dates: dates marked on the calendar for the chosen team(s) and for everyone, starting or under way in the next 14 days.'),
           h('li', null, 'Away: approved leave only, in working days (weekends and public holidays are not counted).'))));
   }
 

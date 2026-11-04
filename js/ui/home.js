@@ -9,6 +9,9 @@ import {
 import { toast, errorMessage, statusChip, priorityChip, emptyState, spinner } from './components.js';
 import { openTaskPanel } from './taskform.js';
 import { dueState, dueLabel } from './tasks.js';
+import { loadKeyDates } from '../core/store.js';
+import { comingUp, whenText, KEY_CATEGORY_LABEL } from '../core/keydates.js';
+import { fmtDate } from '../core/util.js';
 
 function greeting() {
   const hour = new Date().getHours();
@@ -24,13 +27,14 @@ export function renderHome(container) {
   const setup = h('div');
   const tiles = h('div', { class: 'tiles' });
   const upcoming = h('div', { class: 'upcoming' });
+  const keysAhead = h('section', { class: 'card-block keys-ahead', hidden: true });
   const teamCard = h('section', { class: 'card-block' });
 
   container.append(
     h('div', { class: 'page-head' },
       h('h1', null, `${greeting()}, ${user.name.split(' ')[0]}`),
       h('p', { class: 'muted' }, fmtDateLong(todayISO()))),
-    setup, tiles, upcoming, teamCard);
+    setup, tiles, upcoming, keysAhead, teamCard);
 
   // ---- first-time setup (Director only)
   function drawSetup() {
@@ -101,6 +105,21 @@ export function renderHome(container) {
       tasks.length > 8 ? h('p', null, h('a', { href: '#/my' }, `See all ${tasks.length}`)) : null);
   }
 
+  // ---- key dates ahead (Semester starts, Exam week...). One cached read, shared with the calendar and the bell.
+  function drawKeys(list) {
+    const items = comingUp(list, todayISO(), 30).slice(0, 8);
+    keysAhead.hidden = items.length === 0;
+    clear(keysAhead);
+    if (!items.length) return;
+    keysAhead.append(
+      h('h2', null, '★ Key dates ahead', h('span', { class: 'count' }, items.length)),
+      h('ul', null, items.map((o) => h('li', null,
+        h('span', { class: 'key-when' }, whenText(o)),
+        h('a', { href: '#/calendar' }, o.kd.title),
+        h('span', { class: 'muted' }, `${fmtDate(o.startDate)}${o.endDate !== o.startDate ? ' to ' + fmtDate(o.endDate) : ''} · ${KEY_CATEGORY_LABEL[o.kd.category] || 'Other'}`)))));
+  }
+  const loadKeys = () => loadKeyDates().then(drawKeys).catch(() => { /* key dates are optional on Home */ });
+
   // ---- team overview, loaded only when asked (keeps reads low)
   function drawTeam() {
     clear(teamCard);
@@ -163,13 +182,16 @@ export function renderHome(container) {
   drawSetup();
   paint();
   drawTeam();
+  loadKeys();
+  const onKeys = () => loadKeys();
+  bus.addEventListener('keydates', onKeys);
   unwatch = watchMyTasks(() => { paint(); if (teamLoaded) drawTeam(); }, (err) => {
     clear(upcoming).append(emptyState('Could not load your tasks', errorMessage(err)));
   });
   const onTasks = () => { paint(); if (teamLoaded) drawTeam(); };
   bus.addEventListener('tasks', onTasks);
 
-  return () => { if (unwatch) unwatch(); bus.removeEventListener('tasks', onTasks); };
+  return () => { if (unwatch) unwatch(); bus.removeEventListener('tasks', onTasks); bus.removeEventListener('keydates', onKeys); };
 }
 
 export { isDemo, pluralize };

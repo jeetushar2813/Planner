@@ -7,9 +7,10 @@ import { appSettings } from './config.js';
 import * as perm from './core/perm.js';
 import {
   state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError, hrQueue, refreshHrQueue,
-  watchMyTasks, runRecurring, loadMyStepTasks, loadMyMentions, markMentionsRead, loadTask
+  watchMyTasks, runRecurring, loadMyStepTasks, loadMyMentions, markMentionsRead, loadTask, loadKeyDates, keyDates
 } from './core/store.js';
-import { computeAlerts, getSeen, markSeen } from './core/alerts.js';
+import { computeAlerts, getSeen, markSeen, getDismissedKeys, dismissKeys } from './core/alerts.js';
+import { whenText } from './core/keydates.js';
 import { fmtDate } from './core/util.js';
 import { renderTemplates } from './ui/templates.js';
 import { loadBackend } from './backend/index.js';
@@ -131,7 +132,7 @@ function buildBell() {
   let mentions = [];     // notes from comments that name me with @, until I mark them read
   let alerts = computeAlerts([], user, { seenAt: getSeen(user.id) });
   const refresh = () => {
-    alerts = computeAlerts(state.tasks.values(), user, { seenAt: getSeen(user.id), mentions });
+    alerts = computeAlerts(state.tasks.values(), user, { seenAt: getSeen(user.id), mentions, keyDates: keyDates.list, dismissedKeys: getDismissedKeys(user.id) });
     count.textContent = alerts.count;
     count.hidden = !alerts.count;
     if (pop) drawPop();
@@ -146,6 +147,9 @@ function buildBell() {
     const a = alerts;
     if (!a.count) pop.append(h('p', { class: 'muted' }, 'Nothing needs your attention right now.'));
     if (a.assigned.length) pop.append(h('h3', null, 'New for you'), ...a.assigned.map((t) => item(t, `From ${userName(t.assignedBy || t.createdBy)}${t.dueDate ? `, due ${fmtDate(t.dueDate)}` : ''}`)));
+    if (a.keyDates.length) pop.append(h('h3', null, 'Key dates coming up'), ...a.keyDates.map((k) => h('button', {
+      type: 'button', class: 'alert-item', onclick: () => { close(); location.hash = '#/calendar'; }
+    }, h('strong', null, k.kd.title), h('span', { class: 'sub' }, `${whenText({ ...k, underway: false })} · ${fmtDate(k.startDate)}${k.endDate !== k.startDate ? ` to ${fmtDate(k.endDate)}` : ''}${k.kd.teamId ? '' : ' · everyone'}`))));
     if (a.mentions.length) pop.append(h('h3', null, 'Mentioned you'), ...a.mentions.map((m) => h('button', {
       type: 'button', class: 'alert-item', onclick: async () => {
         close();
@@ -162,8 +166,9 @@ function buildBell() {
     if (a.dueSoon.length) pop.append(h('h3', null, 'Due soon'), ...a.dueSoon.map((t) => item(t, `Due ${fmtDate(t.dueDate)}`)));
     pop.append(h('div', { class: 'alert-foot' },
       h('a', { href: '#/my', onclick: close }, 'Open My tasks'),
-      a.assigned.length || a.steps.length || a.mentions.length ? h('button', { type: 'button', class: 'link-btn', onclick: () => {
+      a.assigned.length || a.steps.length || a.mentions.length || a.keyDates.length ? h('button', { type: 'button', class: 'link-btn', onclick: () => {
         markSeen(user.id);
+        dismissKeys(user.id, alerts.keyDates.map((k) => k.key));
         const ids = mentions.map((m) => m.id); mentions = [];
         if (ids.length) markMentionsRead(ids).catch(() => {});
         refresh();
@@ -190,6 +195,7 @@ function buildBell() {
     stepsLoadedAt = Date.now();
     loadMyStepTasks().then(refresh).catch(() => { stepsLoadedAt = 0; });
     loadMyMentions().then((docs) => { mentions = docs; refresh(); }).catch(() => {});
+    loadKeyDates().then(refresh).catch(() => {});
   };
   btn.addEventListener('click', loadSteps);
   loadSteps();

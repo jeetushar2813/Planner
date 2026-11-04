@@ -77,12 +77,14 @@ export const ACTION_LABEL = {
   'policy.update': 'Updated leave entitlements',
   'holiday.create': 'Added holiday',
   'holiday.update': 'Edited holiday',
+  'keydate.create': 'Added key date',
+  'keydate.update': 'Edited key date',
   'template.create': 'Created task template',
   'template.update': 'Edited task template',
   'template.run': 'Made a recurring task'
 };
 
-export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy'];
+export const ENTITY_TYPES = ['task', 'comment', 'user', 'team', 'project', 'status', 'leave', 'holiday', 'policy', 'template', 'keydate'];
 
 // Leave. Only APPROVED leave counts towards availability on the calendar.
 export const LEAVE_TYPES = ['annual', 'sick', 'hospitalization', 'compassionate', 'marriage', 'training', 'other'];

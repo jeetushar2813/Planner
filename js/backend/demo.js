@@ -363,6 +363,16 @@ function seed() {
   holiday('hol1', 'Company day off (sample)', weekday(12), null);
   holiday('hol2', 'Content team offsite (sample)', weekday(6), 'content');
 
+  // Key dates: a one-day date within the alert window, a yearly company-wide start of term (a year ago,
+  // so it shows again this year), and a date range for one team.
+  const keyDate = (id, doc) => put('keyDates', id, {
+    note: '', category: 'other', yearly: false, active: true, teamId: null, createdBy: 'dana', createdAt: now, updatedAt: now, lastLogId: 'seed', ...doc
+  });
+  const yearAgo = (iso) => `${Number(iso.slice(0, 4)) - 1}${iso.slice(4)}`;
+  keyDate('kd1', { title: 'Orientation Day', startDate: day(2), endDate: day(2), category: 'event', note: 'All staff to the main hall' });
+  keyDate('kd2', { title: 'Semester 2 starts', startDate: yearAgo(day(10)), endDate: yearAgo(day(10)), category: 'term', yearly: true });
+  keyDate('kd3', { title: 'Exam week', startDate: day(20), endDate: day(24), category: 'exam', teamId: 'content', createdBy: 'lena' });
+
   put('tasks/t03/comments', 'c_demo1', {
     authorId: 'lena', authorName: 'Lena Wong', text: 'Sent to QC. Please check the BM version first.',
     createdAt: new Date(now.getTime() - 3600000 * 5), logId: 'seed'

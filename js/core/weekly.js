@@ -7,6 +7,7 @@
 import { wasOnTime, isOverdue, isOpenTask, pct } from './metrics.js';
 import { isApproved, leaveWorkdays, dayStatus, weekStartsOn } from './calendar.js';
 import { openBlockers } from './deps.js';
+import { comingUp, whenText, KEY_CATEGORY_LABEL } from './keydates.js';
 import { addDays, startOfWeek, daysBetween, toDate, toISO, fmtDate } from './util.js';
 
 export const WEEK_CHOICES = [
@@ -24,7 +25,9 @@ export function resolveWeek(kind, today) {
 const dateOf = (value) => { const d = toDate(value); return d ? toISO(d) : null; };
 const inRange = (iso, a, b) => !!iso && iso >= a && iso <= b;
 
-export function compileWeekly({ people, tasks, leaves, holidays, week, today }) {
+export const KEY_AHEAD_DAYS = 14;
+
+export function compileWeekly({ people, tasks, leaves, holidays, week, today, keyDates = [] }) {
   const ids = new Set(people.map((p) => p.id));
   const mine = tasks.filter((t) => ids.has(t.ownerId));
   const byId = new Map(tasks.map((t) => [t.id, t]));
@@ -65,6 +68,10 @@ export function compileWeekly({ people, tasks, leaves, holidays, week, today }) 
     .filter((x) => x.days > 0)
     .sort((a, b) => a.leave.startDate.localeCompare(b.leave.startDate) || a.person.name.localeCompare(b.person.name));
 
+  // Key dates (Semester starts, Exam week...) starting or under way in the next two weeks. The caller passes the
+  // ones that apply to the chosen team(s) and to everyone.
+  const keys = comingUp(keyDates, today, KEY_AHEAD_DAYS);
+
   const rows = people.map((p) => {
     const d = done.filter((t) => t.ownerId === p.id);
     return {
@@ -78,10 +85,10 @@ export function compileWeekly({ people, tasks, leaves, holidays, week, today }) 
   const headline = {
     done: done.length, onTimeRate: done.length ? (done.length - finishedLate.length) / done.length : null, late: finishedLate.length,
     created: created.length, steps: steps.length,
-    overdue: overdue.length, review: review.length, blocked: blocked.length, upcoming: upcoming.length, away: away.length
+    overdue: overdue.length, review: review.length, blocked: blocked.length, upcoming: upcoming.length, away: away.length, keys: keys.length
   };
 
-  const model = { week, headline, rows, done, finishedLate, steps, overdue, review, blocked, upcoming, away, names: personOf };
+  const model = { week, headline, rows, done, finishedLate, steps, overdue, review, blocked, upcoming, away, keys, names: personOf };
   model.glance = glance(model, today);
   return model;
 }
@@ -109,6 +116,10 @@ function glance(m, today) {
   lines.push(h.upcoming
     ? `${plural(h.upcoming, 'task is', 'tasks are')} due in the next 7 days${awayDue ? `, ${awayDue} of them when the owner is away` : ''}.`
     : 'Nothing is due in the next 7 days.');
+  if (m.keys.length) {
+    const first = m.keys[0];
+    lines.push(`${plural(m.keys.length, 'key date', 'key dates')} in the next ${KEY_AHEAD_DAYS} days. First: ${first.kd.title} (${whenText(first)}).`);
+  }
   return lines;
 }
 
@@ -127,6 +138,7 @@ export function weeklyText(m, { scope, nameOf, today }) {
   section('Waiting for review', m.review, task);
   section('Blocked or paused', m.blocked, task);
   section('Due in the next 7 days', m.upcoming, (u) => `${task(u.task)}${u.away ? ' - owner away' : ''}`);
+  section(`Key dates in the next ${KEY_AHEAD_DAYS} days`, m.keys, (o) => `- ${o.kd.title}: ${fmtDate(o.startDate)}${o.endDate !== o.startDate ? ' to ' + fmtDate(o.endDate) : ''} (${whenText(o)}, ${KEY_CATEGORY_LABEL[o.kd.category] || 'Other'})`);
   section('Away in the next 2 weeks', m.away, (a) => `- ${a.person.name}: ${fmtDate(a.leave.startDate)} to ${fmtDate(a.leave.endDate)} (${a.days} working day${a.days === 1 ? '' : 's'})`);
   return out.join('\n');
 }

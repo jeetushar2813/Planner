@@ -1058,3 +1058,91 @@ describe('weekly summary', () => {
     assert.deepEqual(r.done.map((x) => x.id), ['x1']);
   });
 });
+
+// ---------------------------------------------------------------- key dates
+import { shiftYears, validateKeyDate, occurrencesIn, comingUp, keyDateAlerts, whenText, dayOf, coversDay } from '../js/core/keydates.js';
+
+describe('key dates', () => {
+  const kd = (id, startDate, over = {}) => ({ id, title: id, startDate, endDate: startDate, teamId: null, category: 'event', yearly: false, active: true, ...over });
+
+  test('shiftYears keeps month and day, and moves 29 Feb to 28 Feb in a non-leap year', () => {
+    assert.equal(shiftYears('2024-02-29', 1), '2025-02-28');
+    assert.equal(shiftYears('2024-02-29', 4), '2028-02-29');
+    assert.equal(shiftYears('2026-09-01', 0), '2026-09-01');
+    assert.equal(shiftYears('2026-09-01', 2), '2028-09-01');
+  });
+  test('validation', () => {
+    const ok = { title: 'Semester 1 starts', startDate: '2026-09-01', endDate: '', category: 'term' };
+    assert.equal(validateKeyDate(ok), null);
+    assert.match(validateKeyDate({ ...ok, title: ' ' }), /title/);
+    assert.match(validateKeyDate({ ...ok, startDate: '' }), /first day/);
+    assert.match(validateKeyDate({ ...ok, endDate: '2026-08-31' }), /before the first day/);
+    assert.match(validateKeyDate({ ...ok, endDate: '2026-12-31' }), /at most 60 days/);
+    assert.match(validateKeyDate({ ...ok, category: 'x' }), /type/);
+    assert.match(validateKeyDate({ ...ok, note: 'x'.repeat(501) }), /note is too long/);
+  });
+  test('a one-day date shows once; inactive dates never show', () => {
+    const list = [kd('a', '2026-11-05'), kd('off', '2026-11-05', { active: false })];
+    const o = occurrencesIn(list, '2026-11-01', '2026-11-30');
+    assert.deepEqual(o.map((x) => x.kd.id), ['a']);
+    assert.equal(o[0].key, 'a:2026-11-05');
+    assert.equal(occurrencesIn(list, '2026-12-01', '2026-12-31').length, 0);
+  });
+  test('a yearly date comes back each year, never before its first year', () => {
+    const list = [kd('sem', '2025-09-01', { yearly: true })];
+    assert.deepEqual(occurrencesIn(list, '2026-08-01', '2026-10-01').map((x) => x.startDate), ['2026-09-01']);
+    assert.deepEqual(occurrencesIn(list, '2025-01-01', '2027-12-31').map((x) => x.startDate), ['2025-09-01', '2026-09-01', '2027-09-01']);
+    assert.equal(occurrencesIn(list, '2024-08-01', '2024-10-01').length, 0);
+    const keys = occurrencesIn(list, '2025-01-01', '2027-12-31').map((x) => x.key);
+    assert.equal(new Set(keys).size, 3);                                       // one key per showing
+  });
+  test('a range that runs over New Year, yearly, is found from either side', () => {
+    const list = [kd('break', '2025-12-28', { endDate: '2026-01-04', yearly: true })];
+    assert.deepEqual(occurrencesIn(list, '2026-01-02', '2026-01-03').map((x) => [x.startDate, x.endDate]), [['2025-12-28', '2026-01-04']]);
+    assert.deepEqual(occurrencesIn(list, '2026-12-29', '2026-12-30').map((x) => [x.startDate, x.endDate]), [['2026-12-28', '2027-01-04']]);
+  });
+  test('day positions in a range', () => {
+    const o = occurrencesIn([kd('exam', '2026-11-16', { endDate: '2026-11-20' })], '2026-11-01', '2026-11-30')[0];
+    assert.deepEqual(dayOf(o, '2026-11-18'), { day: 3, of: 5 });
+    assert.equal(coversDay(o, '2026-11-21'), false);
+    assert.equal(dayOf(occurrencesIn([kd('one', '2026-11-16')], '2026-11-01', '2026-11-30')[0], '2026-11-16'), null);
+  });
+  test('coming up: includes ones under way, soonest first, with daysAway', () => {
+    const list = [kd('later', '2026-11-20'), kd('now', '2026-11-01', { endDate: '2026-11-06' }), kd('soon', '2026-11-05'), kd('far', '2027-01-01'), kd('past', '2026-10-01')];
+    const r = comingUp(list, '2026-11-03', 30);
+    assert.deepEqual(r.map((x) => x.kd.id), ['now', 'soon', 'later']);
+    assert.deepEqual(r.map((x) => whenText(x)), ['under way', 'in 2 days', 'in 17 days']);
+    assert.equal(whenText({ daysAway: 0 }), 'today'); assert.equal(whenText({ daysAway: 1 }), 'tomorrow');
+  });
+  test('alerts: starting today or within the lead days, once each until cleared', () => {
+    const list = [kd('today', '2026-11-03'), kd('t2', '2026-11-06'), kd('t4', '2026-11-07'), kd('under', '2026-11-01', { endDate: '2026-11-05' })];
+    const r = keyDateAlerts(list, '2026-11-03', 3);
+    assert.deepEqual(r.map((x) => x.kd.id), ['today', 't2']);                  // t4 is 4 days away; the range started before today
+    assert.deepEqual(keyDateAlerts(list, '2026-11-03', 3, new Set(['today:2026-11-03'])).map((x) => x.kd.id), ['t2']);
+    assert.deepEqual(keyDateAlerts(list, '2026-11-03', 4).map((x) => x.kd.id), ['today', 't2', 't4']);
+  });
+  test('a yearly date alerts again next year (new key), even if last year was cleared', () => {
+    const list = [kd('sem', '2025-09-01', { yearly: true })];
+    const dismissed = new Set(['sem:2025-09-01']);
+    assert.equal(keyDateAlerts(list, '2025-08-30', 3, dismissed).length, 0);
+    assert.equal(keyDateAlerts(list, '2026-08-30', 3, dismissed).length, 1);
+  });
+  test('the bell counts key dates until they are cleared', () => {
+    const me = { id: 'me' };
+    const r = computeAlerts([], me, { today: '2026-11-03', keyDates: [kd('x', '2026-11-04')] });
+    assert.equal(r.keyDates.length, 1); assert.equal(r.count, 1);
+    assert.equal(computeAlerts([], me, { today: '2026-11-03', keyDates: [kd('x', '2026-11-04')], dismissedKeys: new Set(['x:2026-11-04']) }).count, 0);
+  });
+  test('weekly summary lists key dates for the next two weeks, in the sentences and the text copy', () => {
+    const w = resolveWeek('last', '2026-11-04');
+    const keyDates = [kd('Exam week', '2026-11-10', { endDate: '2026-11-13', category: 'exam' }), kd('Far', '2026-12-25')];
+    const r = compileWeekly({ people: [], tasks: [], leaves: [], holidays: [], week: w, today: '2026-11-04', keyDates });
+    assert.deepEqual(r.keys.map((x) => x.kd.id), ['Exam week']);
+    assert.equal(r.headline.keys, 1);
+    assert.ok(r.glance.some((g) => /1 key date in the next 14 days\. First: Exam week \(in 6 days\)/.test(g)));
+    const text = weeklyText(r, { scope: 'All', nameOf: () => '', today: '2026-11-04' });
+    assert.match(text, /Key dates in the next 14 days \(1\)/);
+    assert.match(text, /- Exam week: 10 Nov to 13 Nov \(in 6 days, Exams\)/);
+    assert.equal(compileWeekly({ people: [], tasks: [], leaves: [], holidays: [], week: w, today: '2026-11-04' }).keys.length, 0);
+  });
+});

@@ -21,6 +21,7 @@ import { applyTheme, isTheme } from './theme.js';
 import { cleanTags } from './tags.js';
 import { MAX_BLOCKERS } from './deps.js';
 import { missingForNew } from './taskrules.js';
+import { validateKeyDate, KEY_CATEGORY_LABEL } from './keydates.js';
 import { findMentions, snippetOf, MAX_MENTIONS } from './mentions.js';
 import { dueOccurrence, occurrenceTaskId, dueDateFor, MAX_TEMPLATE_OWNERS, REPEATS } from './recurrence.js';
 
@@ -1134,6 +1135,76 @@ export async function updateHoliday(holiday, patch) {
   await backend.commit([{ type: 'update', path: 'holidays/' + holiday.id, data }, log.op]);
   emit('leave');
   return { ...holiday, ...data };
+}
+
+// ------------------------------------------------------------------------ key dates
+//
+// Days worth marking on the calendar (Semester 1 starts, Exam week ...). Everyone signed in reads
+// them. There are only a few dozen, so they are read in one go and kept for 10 minutes, then
+// shared by Home, Calendar, the Weekly summary and the Alerts bell.
+
+const KEYDATE_TTL = 10 * 60000;
+export const keyDates = { list: [], at: 0, user: null };
+
+export async function loadKeyDates({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && keyDates.user === state.user?.id && now - keyDates.at < KEYDATE_TTL) return keyDates.list;
+  const { docs } = await backend.query('keyDates', { where: [] });
+  // Everyone can read them all, but a team's own dates are only shown to people who can see that team.
+  const mine = new Set(myTeams().map((t) => t.id));
+  keyDates.list = docs.filter((d) => d.active !== false && (!d.teamId || mine.has(d.teamId)));
+  keyDates.at = now; keyDates.user = state.user?.id || null;
+  return keyDates.list;
+}
+
+// Team Leaders and Managers add dates for their own team; Directors and Superusers for anyone.
+export const canManageKeyDates = (u) => perm.isLeaderUp(u);
+export const canManageKeyDateFor = (u, teamId) => perm.isDirector(u) || (perm.isLeaderUp(u) && !!teamId && perm.inTeam(u, teamId));
+
+// draft: { title, startDate, endDate, teamId, category, yearly, note }. `existing` is null for a new one.
+export async function saveKeyDate(existing, draft) {
+  const next = {
+    title: (draft.title || '').trim(), startDate: draft.startDate, endDate: draft.endDate || draft.startDate,
+    teamId: draft.teamId || null, category: draft.category || 'other', yearly: draft.yearly === true,
+    note: (draft.note || '').trim(), active: draft.active !== false
+  };
+  const problem = validateKeyDate(next);
+  if (problem) throw new Error(problem);
+  if (!canManageKeyDateFor(state.user, next.teamId)) {
+    throw new Error(next.teamId ? 'You can only add key dates for your own team.' : 'Only the Director can add a key date for everyone. Choose your team instead.');
+  }
+  if (existing && !canManageKeyDateFor(state.user, existing.teamId)) throw new Error('You cannot change this key date.');
+  const scope = next.teamId ? teamName(next.teamId) : 'Everyone';
+  const resolve = (field, v) => (field === 'teamId' ? (v ? teamName(v) : 'Everyone') : field === 'yearly' ? (v ? 'Yes' : 'No') : field === 'category' ? KEY_CATEGORY_LABEL[v] || v : v);
+  const FIELDS = ['title', 'startDate', 'endDate', 'teamId', 'category', 'yearly', 'note', 'active'];
+  if (!existing) {
+    const id = backend.newId('keyDates');
+    const log = makeLog({
+      action: 'keydate.create', entityType: 'keydate', entityId: id, entityTitle: `${next.title} (${next.startDate})`, teamId: next.teamId,
+      changes: [{ field: 'startDate', from: '', to: next.startDate }, { field: 'endDate', from: '', to: next.endDate }, { field: 'teamId', from: '', to: scope }]
+    });
+    const doc = {
+      title: next.title, startDate: next.startDate, endDate: next.endDate, teamId: next.teamId, category: next.category, yearly: next.yearly,
+      ...(next.note ? { note: next.note } : {}), active: true,
+      createdBy: state.user.id, createdAt: backend.ts(), updatedAt: backend.ts(), lastLogId: log.id
+    };
+    await backend.commit([{ type: 'set', path: 'keyDates/' + id, data: doc }, log.op]);
+    keyDates.at = 0;
+    emit('keydates');
+    return { id, ...doc, createdAt: new Date(), updatedAt: new Date() };
+  }
+  const before = { ...existing, note: existing.note || '' };
+  const changes = diffFields(before, next, FIELDS, resolve);
+  if (!changes.length) return existing;
+  const log = makeLog({
+    action: 'keydate.update', entityType: 'keydate', entityId: existing.id, entityTitle: `${next.title} (${next.startDate})`, teamId: next.teamId, changes
+  });
+  const data = { lastLogId: log.id, updatedAt: backend.ts() };
+  for (const c of changes) data[c.field] = c.field === 'note' && !next.note ? null : next[c.field];
+  await backend.commit([{ type: 'update', path: 'keyDates/' + existing.id, data }, log.op]);
+  keyDates.at = 0;
+  emit('keydates');
+  return { ...existing, ...data, updatedAt: new Date() };
 }
 
 // -------------------------------------------------------------------- activity log

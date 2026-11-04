@@ -387,6 +387,7 @@ table.log td { vertical-align: top; }
   --viz-axis: #c3c2b7;
   --viz-tick: #898781;
   --cal-off: #f1f2f5;
+  --key-color: #7c5cd6;   /* key dates: purple, always with a star so colour is not the only cue */
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -397,6 +398,7 @@ table.log td { vertical-align: top; }
     --viz-axis: #3b404d;
     --viz-tick: #98a0b2;
     --cal-off: #12151c;
+    --key-color: #a48cf0;
   }
 }
 
@@ -521,6 +523,14 @@ table.avail thead th { font-weight: 600; color: var(--muted); height: 40px; bord
 .chip-leave { background: color-mix(in srgb, var(--viz-3) 24%, var(--surface)); border-left: 3px solid var(--viz-3); }
 .chip-pending { border-left-style: dashed; background: transparent; outline: 1px dashed var(--viz-3); outline-offset: -1px; }
 .chip-holiday { background: var(--surface-2); color: var(--muted); border-left: 3px solid var(--viz-axis); font-weight: 600; }
+.chip-key { background: color-mix(in srgb, var(--key-color) 22%, var(--surface)); border-left: 3px double var(--key-color); font-weight: 650; cursor: pointer; }
+.chip-key:hover { background: color-mix(in srgb, var(--key-color) 32%, var(--surface)); }
+.key-box.chip-key { border-left-width: 3px; }
+.keys-ahead { margin-top: 16px; }
+.keys-ahead ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.keys-ahead li { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.keys-ahead .key-when { min-width: 7.5em; font-weight: 650; }
+.keys-ahead .key-star { color: var(--key-color); }
 .cal-more { font-size: .74rem; color: var(--muted); padding: 0 6px; }
 .cal-key { margin-top: 12px; }
 .cal-key .key-box { border-radius: 3px; width: 14px; height: 14px; }
