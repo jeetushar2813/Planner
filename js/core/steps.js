@@ -21,6 +21,9 @@ export function cleanSteps(steps) {
     const out = { id: s.id, text: String(s.text || '').slice(0, 200), done: s.done === true };
     if (s.assigneeId) out.assigneeId = s.assigneeId;
     if (s.forTeam === true && !s.assigneeId) out.forTeam = true;
+    // who gave the step to this person, and when (their "given to you" alert reads these)
+    if (s.assigneeId && s.assignedAt) out.assignedAt = s.assignedAt;
+    if (s.assigneeId && s.assignedBy) out.assignedBy = s.assignedBy;
     if (out.done && s.doneBy) out.doneBy = s.doneBy;
     if (out.done && s.doneAt) out.doneAt = s.doneAt;
     return out;
@@ -50,4 +53,40 @@ export function stepsForUser(task, user) {
     && (s.assigneeId === user.id || (s.forTeam === true && inTeam)));
 }
 
-export const hasSteps = (task) => (task.checklist || []).some((s) => s.assigneeId || s.forTeam);
+// Stamps "given by / given at" on every step that has a person. A step keeps its old stamp only
+// when the same person still holds it; a new or changed person gets a fresh one. `original` is
+// the task's steps before the change (empty for a new task, so a copied task stamps again).
+export function stampSteps(steps, original, userId, nowISO = new Date().toISOString()) {
+  const before = new Map((original || []).map((s) => [s.id, s]));
+  return (steps || []).map((s) => {
+    if (!s.assigneeId) {
+      const { assignedAt, assignedBy, ...rest } = s; // eslint-disable-line no-unused-vars
+      return rest;
+    }
+    const prev = before.get(s.id);
+    if (prev && prev.assigneeId === s.assigneeId) {
+      // Same person as before: keep the old stamp. Steps given before this feature have none and
+      // stay that way, so an unrelated edit never rewrites them.
+      return prev.assignedAt ? { ...s, assignedAt: prev.assignedAt, assignedBy: prev.assignedBy || s.assignedBy } : s;
+    }
+    return { ...s, assignedAt: nowISO, assignedBy: userId };
+  });
+}
+
+// Steps given to this person by someone else after `seenAt` (ms), still waiting, on open tasks.
+// Returns [{ task, step, at }] newest first.
+export function newStepsFor(tasks, user, seenAt, isOpen) {
+  const out = [];
+  for (const task of tasks) {
+    if (task.archived || !isOpen(task)) continue;
+    for (const step of task.checklist || []) {
+      if (step.done || step.assigneeId !== user.id || !step.assignedAt) continue;
+      if (step.assignedBy === user.id) continue;
+      const at = new Date(step.assignedAt).getTime();
+      if (at > seenAt) out.push({ task, step, at });
+    }
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+
+export const hasSteps =(task) => (task.checklist || []).some((s) => s.assigneeId || s.forTeam);

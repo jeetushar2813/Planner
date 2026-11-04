@@ -4,6 +4,8 @@
 // What the numbers mean (also shown on the report):
 //  - Completed: a task that reached a Done status, counted on the day it was completed.
 //  - On time: completed on or before its due date (no due date counts as on time).
+//  - Steps done: checklist steps ticked in the period, credited to the person who ticked them
+//    (on their own task or someone else's). Steps waiting: steps given to a person, not yet done.
 //  - Created: tasks added in the period. Tasks that were cancelled ("closed") are not included.
 //  - Open now / Overdue now: the position today. The app does not keep history, so this is
 //    never "as at the end of the period".
@@ -167,6 +169,16 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
   const open = mine.filter(isOpenTask);
   const overdue = open.filter((t) => isOverdue(t, today));
 
+  // Checklist steps count for the person who ticked them, whoever owns the task. The day is the
+  // person's local day, like the completed date of a task.
+  const stepsIn = (a, b) => tasks.flatMap((t) => (t.checklist || [])
+    .filter((s) => s.done === true && s.doneBy && personIds.has(s.doneBy) && inRange(dateOf(s.doneAt), a, b))
+    .map((s) => ({ task: t, step: s, by: s.doneBy, date: dateOf(s.doneAt) })));
+  const stepsNow = stepsIn(from, to), stepsPrev = stepsIn(prev.from, prev.to);
+  // Steps given to a person that are still waiting, on tasks that are still open.
+  const stepsWaiting = (id) => tasks.filter(isOpenTask)
+    .reduce((n, t) => n + (t.checklist || []).filter((s) => !s.done && s.assigneeId === id).length, 0);
+
   // Per bucket
   const buckets = bucketsFor(period).map((b) => {
     const d = doneNow.filter((t) => t.completedDate >= b.start && t.completedDate <= b.end);
@@ -191,6 +203,9 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
       person: p, done: d.length, onTime: on, late: d.length - on, rate: d.length ? on / d.length : null,
       avgDays: mean(cyc), rework: reworkOf(d), created: created(from, to).filter((t) => t.ownerId === p.id).length,
       openNow: myOpen.length, overdueNow: myOpen.filter((t) => isOverdue(t, today)).length,
+      stepsDone: stepsNow.filter((x) => x.by === p.id).length,
+      stepsHelped: stepsNow.filter((x) => x.by === p.id && x.task.ownerId !== p.id).length,   // on someone else's task
+      stepsWaiting: stepsWaiting(p.id),
       leaveDays: sumDays(myLeave), leaveByType: byType
     };
   }).sort((a, b) => a.person.name.localeCompare(b.person.name));
@@ -225,8 +240,10 @@ export function compileReport({ period, tasks, people, leaves, holidays, today, 
       avgDays: mean(cycleNow), avgDaysPrev: mean(cyclePrev),
       rework: reworkOf(doneNow), reworkPrev: reworkOf(donePrev),
       leaveDays: sumDays(leaveNow), leaveDaysPrev: sumDays(leavePrev),
-      openNow: open.length, overdueNow: overdue.length
+      openNow: open.length, overdueNow: overdue.length,
+      steps: stepsNow.length, stepsPrev: stepsPrev.length
     },
+    steps: stepsNow.sort((a, b) => a.date.localeCompare(b.date) || a.step.text.localeCompare(b.step.text)),
     buckets, busiest, quietest,
     people: peopleRows, projects: projectRows,
     completed: doneNow.sort(sortByDone),

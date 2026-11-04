@@ -30,6 +30,7 @@ export function reportSheets(model, lookup) {
       head(['Measure', 'This period', 'Previous period', 'Change']),
       line('Tasks completed', h.completed, h.completedPrev),
       line('Finished on time', h.onTimeRate, h.onTimeRatePrev, 'pct'),
+      line('Checklist steps done', h.steps, h.stepsPrev),
       line('Tasks created', h.created, h.createdPrev),
       line('Average days to finish', round1(h.avgDays), round1(h.avgDaysPrev), 'dec'),
       line('Times sent back for rework', h.rework, h.reworkPrev),
@@ -43,6 +44,7 @@ export function reportSheets(model, lookup) {
       [{ v: 'How the numbers are worked out', s: 'bold' }],
       ['Completed: tasks that reached a Done status, counted on the day they were completed.'],
       ['On time: completed on or before the due date. A task with no due date counts as on time.'],
+      ['Steps done: checklist steps ticked in the period, credited to the person who ticked them (on their own task or someone else\'s).'],
       ['Created: tasks added in the period. Cancelled tasks are not included.'],
       ['Open and overdue are the position today. The app does not keep history, so they are not as at the end of the period.'],
       model.scopeKind === 'project' ? ['People involved: everyone who owns a task in the project, in any team.']
@@ -52,11 +54,12 @@ export function reportSheets(model, lookup) {
 
   // ---- People
   sheets.push({
-    name: 'People', widths: [24, 10, 10, 8, 14, 10, 10, 11, 12, 12, 10, 10, 10], header: 0,
+    name: 'People', widths: [24, 10, 10, 8, 14, 10, 12, 12, 12, 10, 11, 12, 12, 10, 10, 10], header: 0,
     rows: [
-      head(['Person', 'Completed', 'On time', 'Late', 'Finished on time', 'Avg days to finish', 'Rework', 'Created',
+      head(['Person', 'Completed', 'On time', 'Late', 'Finished on time', 'Avg days to finish', 'Steps done', 'Steps on others tasks', 'Steps waiting', 'Rework', 'Created',
         'Open today', 'Overdue today', ...(model.scopeKind === 'project' ? [] : ['Leave days', 'Sick days', 'Annual days'])]),
       ...model.people.map((r) => [r.person.name, r.done, r.onTime, r.late, { v: r.rate, s: 'pct' }, { v: round1(r.avgDays), s: 'dec' },
+        r.stepsDone, r.stepsHelped, r.stepsWaiting,
         r.rework, r.created, r.openNow, r.overdueNow,
         ...(model.scopeKind === 'project' ? [] : [r.leaveDays, r.leaveByType.sick || 0, r.leaveByType.annual || 0])])
     ]
@@ -82,6 +85,13 @@ export function reportSheets(model, lookup) {
     rows: [head(['Task', 'Owner', 'Team', 'Project', 'Due date', 'Completed', 'On time', 'Days to finish', 'Rework']),
       ...model.completed.map((t) => [t.title, lookup.user(t.ownerId), lookup.team(t.teamId), lookup.project(t.projectId),
         { v: t.dueDate || null, s: 'date' }, { v: t.completedDate, s: 'date' }, wasOnTime(t) ? 'Yes' : 'No', daysToFinish(t), t.reworks || 0])]
+  });
+
+  // ---- Steps
+  sheets.push({
+    name: 'Steps done', widths: [44, 44, 20, 20, 14], header: 0,
+    rows: [head(['Step', 'Task', 'Done by', 'Task owner', 'Done on']),
+      ...model.steps.map((x) => [x.step.text, x.task.title, lookup.user(x.by), lookup.user(x.task.ownerId), { v: x.date, s: 'date' }])]
   });
 
   // ---- Open today

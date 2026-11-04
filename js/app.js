@@ -7,7 +7,7 @@ import { appSettings } from './config.js';
 import * as perm from './core/perm.js';
 import {
   state, bus, setBackend, getBackend, startSession, endSession, loadRefData, isDemo, SessionError, hrQueue, refreshHrQueue,
-  watchMyTasks, runRecurring
+  watchMyTasks, runRecurring, loadMyStepTasks, loadMyMentions, markMentionsRead, loadTask
 } from './core/store.js';
 import { computeAlerts, getSeen, markSeen } from './core/alerts.js';
 import { fmtDate } from './core/util.js';
@@ -21,6 +21,8 @@ import { renderCalendar } from './ui/calendar.js';
 import { renderLeave } from './ui/leave.js';
 import { renderOverview } from './ui/overview.js';
 import { renderReports } from './ui/reports.js';
+import { renderWorkload } from './ui/workload.js';
+import { renderWeekly } from './ui/weekly.js';
 import { renderProjects } from './ui/projects.js';
 import { renderProfile } from './ui/profile.js';
 import { applyTheme, savedTheme } from './core/theme.js';
@@ -46,6 +48,8 @@ const ROUTES = [
   { path: 'hr', label: 'HR leave', icon: '✚', allow: perm.canSeeHr, render: renderHr },
   { path: 'projects', label: 'My projects', icon: '◇', allow: perm.canSeeProjects, render: renderProjects },
   { path: 'overview', label: 'Team overview', icon: '▥', allow: perm.canSeeOverview, render: renderOverview },
+  { path: 'workload', label: 'Workload', icon: '▤', allow: perm.canSeeOverview, render: renderWorkload },
+  { path: 'weekly', label: 'Weekly summary', icon: '▧', allow: perm.canSeeTeamReports, render: renderWeekly },
   { path: 'reports', label: 'Reports', icon: '▨', allow: perm.canSeeReports, render: renderReports },
   { path: 'activity', label: 'Activity', icon: '↻', allow: () => true, render: renderActivity },
   { path: 'profile', label: 'My profile', icon: '◉', allow: () => true, render: renderProfile },
@@ -122,11 +126,12 @@ let stopAlerts = null;      // stops the live listener behind the alerts bell
 function buildBell() {
   const user = state.user;
   const count = h('span', { class: 'bell-count', hidden: true });
-  const btn = h('button', { type: 'button', class: 'btn btn-ghost bell', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: 'New tasks, overdue and due soon' }, 'Alerts', count);
+  const btn = h('button', { type: 'button', class: 'btn btn-ghost bell', 'aria-haspopup': 'true', 'aria-expanded': 'false', title: 'New tasks, mentions, overdue and due soon' }, 'Alerts', count);
   let pop = null;
+  let mentions = [];     // notes from comments that name me with @, until I mark them read
   let alerts = computeAlerts([], user, { seenAt: getSeen(user.id) });
   const refresh = () => {
-    alerts = computeAlerts(state.tasks.values(), user, { seenAt: getSeen(user.id) });
+    alerts = computeAlerts(state.tasks.values(), user, { seenAt: getSeen(user.id), mentions });
     count.textContent = alerts.count;
     count.hidden = !alerts.count;
     if (pop) drawPop();
@@ -141,11 +146,28 @@ function buildBell() {
     const a = alerts;
     if (!a.count) pop.append(h('p', { class: 'muted' }, 'Nothing needs your attention right now.'));
     if (a.assigned.length) pop.append(h('h3', null, 'New for you'), ...a.assigned.map((t) => item(t, `From ${userName(t.assignedBy || t.createdBy)}${t.dueDate ? `, due ${fmtDate(t.dueDate)}` : ''}`)));
+    if (a.mentions.length) pop.append(h('h3', null, 'Mentioned you'), ...a.mentions.map((m) => h('button', {
+      type: 'button', class: 'alert-item', onclick: async () => {
+        close();
+        try {
+          const t = await loadTask(m.taskId);
+          mentions = mentions.filter((x) => x.id !== m.id); refresh();
+          markMentionsRead([m.id]).catch(() => {});
+          if (t) openTaskPanel({ task: t, onSaved: () => route() }); else toast('That task is no longer available to you.', 'error');
+        } catch { toast('Could not open that task.', 'error'); }
+      }
+    }, h('strong', null, m.taskTitle), h('span', { class: 'sub' }, `${m.fromName}: “${m.snippet}”`))));
+    if (a.steps.length) pop.append(h('h3', null, 'Steps given to you'), ...a.steps.map(({ task, step }) => item(task, `“${step.text}” from ${userName(step.assignedBy)} · task owner ${userName(task.ownerId)}`)));
     if (a.overdue.length) pop.append(h('h3', null, 'Overdue'), ...a.overdue.map((t) => item(t, `Was due ${fmtDate(t.dueDate)}`)));
     if (a.dueSoon.length) pop.append(h('h3', null, 'Due soon'), ...a.dueSoon.map((t) => item(t, `Due ${fmtDate(t.dueDate)}`)));
     pop.append(h('div', { class: 'alert-foot' },
       h('a', { href: '#/my', onclick: close }, 'Open My tasks'),
-      a.assigned.length ? h('button', { type: 'button', class: 'link-btn', onclick: () => { markSeen(user.id); refresh(); } }, 'Mark new as seen') : null));
+      a.assigned.length || a.steps.length || a.mentions.length ? h('button', { type: 'button', class: 'link-btn', onclick: () => {
+        markSeen(user.id);
+        const ids = mentions.map((m) => m.id); mentions = [];
+        if (ids.length) markMentionsRead(ids).catch(() => {});
+        refresh();
+      } }, 'Mark new as seen') : null));
   }
   btn.addEventListener('click', () => {
     if (pop) { close(); return; }
@@ -160,6 +182,17 @@ function buildBell() {
   bus.addEventListener('tasks', onTasks);
   let unwatch = null;
   try { unwatch = watchMyTasks(refresh, () => {}); } catch { /* alerts just stay empty */ }
+  // Steps given to me on other people's tasks: one read when the app opens, again when the bell
+  // is opened (at most once every 2 minutes), so a new step shows up without a live listener.
+  let stepsLoadedAt = 0;
+  const loadSteps = () => {
+    if (Date.now() - stepsLoadedAt < 120000) return;
+    stepsLoadedAt = Date.now();
+    loadMyStepTasks().then(refresh).catch(() => { stepsLoadedAt = 0; });
+    loadMyMentions().then((docs) => { mentions = docs; refresh(); }).catch(() => {});
+  };
+  btn.addEventListener('click', loadSteps);
+  loadSteps();
   if (stopAlerts) stopAlerts();
   stopAlerts = () => { bus.removeEventListener('tasks', onTasks); if (unwatch) unwatch(); close(); stopAlerts = null; };
   refresh();

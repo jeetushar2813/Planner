@@ -13,7 +13,7 @@ const FIELD_LABEL = {
   teamIds: 'Teams', active: 'Active', superuser: 'Superuser access', hr: 'HR access', overrides: 'Exceptions', hrAck: 'HR',
   annual: 'Annual leave days', sick: 'Medical leave days', hospitalization: 'Hospitalization leave days', compassionate: 'Compassionate leave days', marriage: 'Marriage leave days', checklistAssignees: 'Step helpers', approvalGate: 'Approval gate',
   category: 'Category', color: 'Colour', order: 'Order', needsReason: 'Needs reason',
-  email: 'Email', text: 'Comment',
+  email: 'Email', text: 'Comment', mentions: 'Mentioned',
   type: 'Type', endDate: 'To', half: 'Day part', reason: 'Reason', decisionNote: 'Decision note',
   date: 'Date', userId: 'Person',
   tags: 'Tags', blockedBy: 'Blocked by', recurring: 'Recurring', repeat: 'Repeats', nextDate: 'Next date',

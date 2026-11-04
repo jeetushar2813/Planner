@@ -272,7 +272,7 @@ describe('report numbers', () => {
   });
   test('the Excel workbook builds with every sheet', () => {
     const sheets = reportSheets(model, { user: (id) => id, team: (id) => id, status: (id) => id, project: (id) => id, today: T, scope: 'Test', by: 'Tester' });
-    assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Open today', 'Leave', 'Holidays']);
+    assert.deepEqual(sheets.map((s) => s.name), ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Steps done', 'Open today', 'Leave', 'Holidays']);
     const bytes = buildXlsx(sheets);
     assert.equal(String.fromCharCode(bytes[0], bytes[1]), 'PK');
     assert.ok(bytes.length > 2000);
@@ -335,7 +335,7 @@ describe('project owners', () => {
     model.scopeKind = 'project'; model.peopleInvolved = 2;
     assert.equal(model.headline.completed, 1); assert.equal(model.headline.overdueNow, 1);
     const names = reportSheets(model, { user: (i) => i, team: (i) => i, status: (i) => i, project: (i) => i, today: T, scope: 'Project: Proj', by: 'Pat' }).map((s) => s.name);
-    assert.deepEqual(names, ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Open today']);
+    assert.deepEqual(names, ['Summary', 'People', 'Projects', 'Over time', 'Completed', 'Steps done', 'Open today']);
   });
 });
 
@@ -380,8 +380,11 @@ describe('colour themes and passwords', () => {
 
 // ------------------------------------------------------------ superuser and steps
 
-import { deriveStepFields, cleanSteps, dropOutsiders, stepsForUser, hasSteps } from '../js/core/steps.js';
+import { deriveStepFields, cleanSteps, dropOutsiders, stepsForUser, hasSteps, stampSteps, newStepsFor } from '../js/core/steps.js';
 import { roleLabel } from '../js/core/model.js';
+import { compileWeekly, resolveWeek, weeklyText } from '../js/core/weekly.js';
+import { compileWorkload, resolveWindow, statusFor, hoursPerDay, WINDOWS } from '../js/core/workload.js';
+import { findMentions, splitMentions, mentionQuery, suggestPeople, snippetOf } from '../js/core/mentions.js';
 
 describe('superuser', () => {
   const su = { id: 'su', role: 'leader', teamIds: ['t1'], superuser: true };
@@ -776,5 +779,282 @@ describe('alerts', () => {
     assert.equal(r.count, 1);
     assert.equal(r.assigned.length, 1);
     assert.equal(r.dueSoon.length, 1);
+  });
+});
+
+describe('credit for checklist steps', () => {
+  const T = '2026-11-03';
+  const period = resolvePeriod('last_month', T);                  // October 2026
+  const people = [{ id: 'a', name: 'Ann', teamIds: ['t1'] }, { id: 'b', name: 'Bob', teamIds: ['t1'] }];
+  const task = (id, ownerId, checklist, over = {}) => ({ id, title: id, ownerId, teamId: 't1', projectId: null, status: 'in_progress', statusCategory: 'active',
+    archived: false, createdAt: new Date('2026-10-01T09:00:00'), dueDate: null, completedDate: null, reworks: 0, checklist, ...over });
+  const step = (id, over = {}) => ({ id, text: 'Step ' + id, done: false, ...over });
+  const tasks = [
+    task('k1', 'a', [
+      step('s1', { done: true, doneBy: 'b', doneAt: '2026-10-10T08:00:00', assigneeId: 'b' }),     // Bob helped on Ann's task
+      step('s2', { done: true, doneBy: 'a', doneAt: '2026-10-11T08:00:00' }),                      // Ann's own step
+      step('s3', { done: true, doneBy: 'b', doneAt: '2026-09-20T08:00:00', assigneeId: 'b' }),     // previous period
+      step('s4', { assigneeId: 'b' }),                                                              // given to Bob, still waiting
+      step('s5', { done: true, doneBy: 'zz', doneAt: '2026-10-12T08:00:00' })                      // person not in this report
+    ])
+  ];
+  const model = compileReport({ period, tasks, people, leaves: [], holidays: [], today: T, teamIds: ['t1'] });
+  const bob = model.people.find((p) => p.person.id === 'b');
+  const ann = model.people.find((p) => p.person.id === 'a');
+
+  test('a step counts for whoever ticked it, not for the task owner', () => {
+    assert.equal(bob.stepsDone, 1);
+    assert.equal(bob.stepsHelped, 1);
+    assert.equal(ann.stepsDone, 1);
+    assert.equal(ann.stepsHelped, 0);
+    assert.equal(bob.done, 0);                                    // no task of his own was completed
+  });
+  test('headline compares with the previous period and lists the steps', () => {
+    assert.equal(model.headline.steps, 2);
+    assert.equal(model.headline.stepsPrev, 1);
+    assert.deepEqual(model.steps.map((x) => x.step.id), ['s1', 's2']);
+  });
+  test('steps still waiting for a person are counted', () => {
+    assert.equal(bob.stepsWaiting, 1);
+    assert.equal(ann.stepsWaiting, 0);
+  });
+  test('stamping: new person gets a fresh stamp, same person keeps theirs, legacy steps stay untouched', () => {
+    const before = [{ id: 'a', text: 'A', done: false, assigneeId: 'x', assignedAt: '2026-10-01T00:00:00.000Z', assignedBy: 'boss' }, { id: 'b', text: 'B', done: false, assigneeId: 'y' }];
+    const now = '2026-11-03T01:00:00.000Z';
+    const after = stampSteps([
+      { id: 'a', text: 'A', done: true, assigneeId: 'x' },            // same person, ticked
+      { id: 'b', text: 'B', done: false, assigneeId: 'y' },           // legacy, unchanged
+      { id: 'c', text: 'C', done: false, assigneeId: 'z' },           // new step for z
+      { id: 'd', text: 'D', done: false, assigneeId: 'w', assignedAt: 'old', assignedBy: 'old' }  // copied task: no original, so stamped again
+    ], before, 'me', now);
+    assert.equal(after[0].assignedAt, '2026-10-01T00:00:00.000Z');
+    assert.equal(after[0].assignedBy, 'boss');
+    assert.equal(after[1].assignedAt, undefined);
+    assert.deepEqual([after[2].assignedAt, after[2].assignedBy], [now, 'me']);
+    assert.equal(stampSteps([after[3]], [], 'me', now)[0].assignedAt, now);
+    assert.equal(stampSteps([{ id: 'e', text: 'E', assignedAt: 'x', assignedBy: 'y' }], [], 'me', now)[0].assignedAt, undefined);   // no person: no stamp
+  });
+  test('cleanSteps keeps the stamp only on steps with a person', () => {
+    const out = cleanSteps([{ id: 'a', text: 'A', assigneeId: 'x', assignedAt: 't', assignedBy: 'b' }, { id: 'b', text: 'B', forTeam: true, assignedAt: 't', assignedBy: 'b' }]);
+    assert.equal(out[0].assignedAt, 't');
+    assert.equal(out[1].assignedAt, undefined);
+  });
+  test('alerts: steps given to me by someone else after I last looked, on open tasks only', () => {
+    const me = { id: 'me' };
+    const seen = new Date('2026-11-03T09:00:00Z').getTime();
+    const mk = (id, steps, over = {}) => ({ id, ownerId: 'boss', statusCategory: 'active', archived: false, checklist: steps, ...over });
+    const given = (id, at, by = 'boss', over = {}) => step(id, { assigneeId: 'me', assignedAt: at, assignedBy: by, ...over });
+    const r = computeAlerts([
+      mk('t1', [given('n', '2026-11-03T10:00:00Z'), given('old', '2026-11-03T08:00:00Z'), given('self', '2026-11-03T11:00:00Z', 'me'), given('dn', '2026-11-03T12:00:00Z', 'boss', { done: true })]),
+      mk('t2', [given('x', '2026-11-03T13:00:00Z')], { statusCategory: 'done' }),
+      mk('t3', [given('y', '2026-11-03T13:00:00Z')], { archived: true }),
+      mk('t4', [step('z', { assigneeId: 'other', assignedAt: '2026-11-03T13:00:00Z', assignedBy: 'boss' })])
+    ], me, { seenAt: seen, today: '2026-11-10' });
+    assert.deepEqual(r.steps.map((x) => x.step.id), ['n']);
+    assert.equal(r.count, 1);
+    assert.equal(newStepsFor([], me, 0, () => true).length, 0);
+  });
+});
+
+describe('@mentions', () => {
+  const people = [{ id: 'omar', name: 'Omar Hakim' }, { id: 'mei', name: 'Mei Ling' }, { id: 'meit', name: 'Mei Ling Tan' }, { id: 'sam', name: 'Sam' }];
+  test('finds the people a comment names', () => {
+    assert.deepEqual(findMentions('Please check @Omar Hakim and @Sam.', people), ['omar', 'sam']);
+    assert.deepEqual(findMentions('@sam first, then @OMAR HAKIM', people), ['sam', 'omar']);          // not case sensitive
+    assert.deepEqual(findMentions('no mentions here, mei@example.com is an email', people), []);
+    assert.deepEqual(findMentions('@Nobody Special', people), []);
+  });
+  test('the longest name wins, and a person is counted once', () => {
+    assert.deepEqual(findMentions('ask @Mei Ling Tan', people), ['meit']);
+    assert.deepEqual(findMentions('ask @Mei Ling about it', people), ['mei']);
+    assert.deepEqual(findMentions('@Sam @Sam @Sam', people), ['sam']);
+  });
+  test('a name must stand alone after the @', () => {
+    assert.deepEqual(findMentions('@Samuel is not Sam', people), []);
+    assert.deepEqual(findMentions('(@Sam), thanks', people), ['sam']);
+    assert.deepEqual(findMentions('x@Sam', people), []);
+  });
+  test('only the first five are kept', () => {
+    const many = Array.from({ length: 8 }, (_, i) => ({ id: 'p' + i, name: 'Person' + i }));
+    assert.equal(findMentions(many.map((p) => '@' + p.name).join(' '), many).length, 5);
+    assert.equal(findMentions(many.map((p) => '@' + p.name).join(' '), many, 6).length, 6);
+  });
+  test('splits a comment for highlighting', () => {
+    assert.deepEqual(splitMentions('Hi @Omar Hakim, ok?', people), [
+      { text: 'Hi ', mention: false }, { text: '@Omar Hakim', mention: true }, { text: ', ok?', mention: false }]);
+    assert.deepEqual(splitMentions('plain', people), [{ text: 'plain', mention: false }]);
+    assert.equal(splitMentions('@Mei Ling Tan', people).filter((x) => x.mention).map((x) => x.text).join(), '@Mei Ling Tan');
+  });
+  test('suggestions while typing', () => {
+    assert.deepEqual(mentionQuery('hello @Om', 9), { query: 'Om', start: 6 });
+    assert.deepEqual(mentionQuery('@', 1), { query: '', start: 0 });
+    assert.equal(mentionQuery('hello world', 5), null);
+    assert.equal(mentionQuery('a@b', 3), null);                       // an email address is not a mention
+    assert.equal(mentionQuery('hi @Omar Hakim ', 15), null);          // the name is finished
+    assert.deepEqual(suggestPeople(people, 'ling').map((p) => p.id), ['mei', 'meit']);
+    assert.deepEqual(suggestPeople(people, 'hak').map((p) => p.id), ['omar']);
+    assert.equal(suggestPeople(people, '', 2).length, 2);
+  });
+  test('snippets are short', () => {
+    assert.equal(snippetOf('a\n  b'), 'a b');
+    assert.equal(snippetOf('x'.repeat(200)).length, 140);
+  });
+  test('alerts: unread notes for me, newest first, counted once each', () => {
+    const me = { id: 'me' };
+    const n = (id, over = {}) => ({ id, toId: 'me', read: false, createdAt: new Date('2026-11-03T10:00:00Z'), ...over });
+    const r = computeAlerts([], me, { seenAt: Date.now(), today: '2026-11-10', mentions: [n('a'), n('b', { createdAt: new Date('2026-11-03T12:00:00Z') }), n('c', { read: true }), n('d', { toId: 'x' })] });
+    assert.deepEqual(r.mentions.map((m) => m.id), ['b', 'a']);
+    assert.equal(r.count, 2);
+    assert.equal(computeAlerts([], me, { seenAt: 0 }).mentions.length, 0);
+  });
+});
+
+describe('workload', () => {
+  // Wed 4 Nov 2026. Rest of the week is Wed, Thu, Fri (weekend excluded): 3 working days, 24 hours.
+  const TODAY = '2026-11-04';
+  const win = resolveWindow('week', TODAY);
+  const ann = { id: 'a', name: 'Ann', teamIds: ['t1'] };
+  const bob = { id: 'b', name: 'Bob', teamIds: ['t1'] };
+  const cat = { id: 'c', name: 'Cat', teamIds: ['t1'] };
+  const mk = (id, ownerId, over = {}) => ({ id, title: id, ownerId, teamId: 't1', statusCategory: 'active', status: 'in_progress', archived: false, dueDate: '2026-11-06', estimateHours: 4, checklist: [], ...over });
+  const run = (tasks, extra = {}) => compileWorkload({ people: [ann, bob, cat], tasks, leaves: [], holidays: [], window: win, today: TODAY, perDay: 8, ...extra });
+
+  test('windows start and end where they should', () => {
+    assert.deepEqual([win.from, win.to], ['2026-11-04', '2026-11-08']);
+    assert.deepEqual([resolveWindow('next_week', TODAY).from, resolveWindow('next_week', TODAY).to], ['2026-11-09', '2026-11-15']);
+    assert.equal(resolveWindow('two_weeks', TODAY).to, '2026-11-17');
+    assert.equal(resolveWindow('month', TODAY).to, '2026-11-30');
+    assert.equal(resolveWindow('month', '2026-12-31').to, '2026-12-31');
+    assert.equal(WINDOWS.length, 4);
+    assert.equal(hoursPerDay(), 8);
+  });
+  test('capacity is working days times hours, after weekend, holiday and leave', () => {
+    const m = run([]);
+    assert.equal(m.rows[0].capacityDays, 3); assert.equal(m.rows[0].capacityHours, 24);
+    const hol = run([], { holidays: [{ date: '2026-11-05', name: 'H', teamId: null, active: true }] });
+    assert.equal(hol.rows[0].capacityDays, 2);
+    const leave = { id: 'l', userId: 'a', teamId: 't1', type: 'annual', startDate: '2026-11-04', endDate: '2026-11-05', half: 'full', status: 'approved' };
+    const lv = run([], { leaves: [leave, { ...leave, id: 'l2', userId: 'b', status: 'pending' }, { ...leave, id: 'l3', userId: 'c', startDate: '2026-11-06', endDate: '2026-11-06', half: 'am' }] });
+    assert.deepEqual(lv.rows.map((r) => r.capacityDays), [1, 3, 2.5]);          // pending leave changes nothing
+  });
+  test('load is the estimated hours due in the period or overdue', () => {
+    const m = run([
+      mk('t1', 'a'), mk('t2', 'a', { dueDate: '2026-11-02', estimateHours: 3 }),            // overdue counts
+      mk('t3', 'a', { dueDate: '2026-11-20', estimateHours: 10 }),                          // later: listed, not counted
+      mk('t4', 'a', { dueDate: null, estimateHours: 5 }),                                    // no date: listed, not counted
+      mk('t5', 'a', { statusCategory: 'done' }), mk('t6', 'a', { archived: true }),         // finished and archived are ignored
+      mk('t7', 'b', { estimateHours: null })
+    ]);
+    const a = m.rows.find((r) => r.person.id === 'a');
+    assert.equal(a.loadHours, 7); assert.equal(a.due.length, 2); assert.equal(a.overdue, 1);
+    assert.equal(a.later.length, 1); assert.equal(a.undated.length, 1); assert.equal(a.openCount, 4);
+    const b = m.rows.find((r) => r.person.id === 'b');
+    assert.equal(b.loadHours, 0); assert.equal(b.noEstimate, 1);                             // flagged, not hidden
+    assert.equal(m.totals.noEstimate, 1);
+  });
+  test('status bands', () => {
+    assert.equal(statusFor(24, 0), 'idle'); assert.equal(statusFor(24, 12), 'ok'); assert.equal(statusFor(24, 5), 'light');
+    assert.equal(statusFor(24, 19.2), 'full'); assert.equal(statusFor(24, 24), 'full'); assert.equal(statusFor(24, 25), 'over');
+    assert.equal(statusFor(0, 4), 'away'); assert.equal(statusFor(0, 0), 'idle');
+    const m = run([mk('x', 'a', { estimateHours: 30 }), mk('y', 'b', { estimateHours: 20 })]);
+    assert.deepEqual(m.rows.map((r) => r.status), ['over', 'full', 'idle']);
+    assert.equal(m.totals.overloaded, 1);
+  });
+  test('someone away all period with work due is flagged', () => {
+    const leave = { id: 'l', userId: 'a', teamId: 't1', type: 'annual', startDate: '2026-11-03', endDate: '2026-11-10', half: 'full', status: 'approved' };
+    const m = run([mk('x', 'a')], { leaves: [leave] });
+    assert.equal(m.rows[0].status, 'away'); assert.equal(m.rows[0].utilisation, null);
+    assert.equal(m.totals.overloaded, 1);
+  });
+  test('waiting steps are counted for the person they were given to, on open tasks only', () => {
+    const m = run([
+      mk('x', 'b', { checklist: [{ id: '1', text: 'one', done: false, assigneeId: 'a' }, { id: '2', text: 'two', done: true, assigneeId: 'a' }, { id: '3', text: 'three', done: false }] }),
+      mk('y', 'b', { statusCategory: 'done', checklist: [{ id: '4', text: 'four', done: false, assigneeId: 'a' }] })
+    ]);
+    assert.equal(m.rows[0].steps.length, 1); assert.equal(m.rows[0].steps[0].step.id, '1');
+    assert.equal(m.totals.stepsWaiting, 1);
+  });
+  test('most room goes to whoever has the most free hours, and skips people with no working days', () => {
+    const leave = { id: 'l', userId: 'c', teamId: 't1', type: 'annual', startDate: '2026-11-03', endDate: '2026-11-10', half: 'full', status: 'approved' };
+    const m = run([mk('x', 'a', { estimateHours: 20 }), mk('y', 'b', { estimateHours: 4 })], { leaves: [leave] });
+    assert.deepEqual(m.mostRoom.map((r) => r.person.id), ['b', 'a']);
+    assert.equal(m.mostRoom[0].freeHours, 20);
+  });
+});
+
+describe('weekly summary', () => {
+  const TODAY = '2026-11-02';                                   // Monday
+  const last = resolveWeek('last', TODAY);                      // 26 Oct to 1 Nov
+  const ann = { id: 'a', name: 'Ann', teamIds: ['t1'] };
+  const bob = { id: 'b', name: 'Bob', teamIds: ['t1'] };
+  const mk = (id, ownerId, over = {}) => ({ id, title: id, ownerId, teamId: 't1', status: 'in_progress', statusCategory: 'active', archived: false,
+    createdAt: new Date('2026-10-01T09:00:00'), dueDate: null, completedDate: null, checklist: [], ...over });
+  const done = (id, ownerId, completedDate, dueDate = null) => mk(id, ownerId, { status: 'done', statusCategory: 'done', completedDate, dueDate });
+  const tasks = [
+    done('d1', 'a', '2026-10-27', '2026-10-30'),                // on time
+    done('d2', 'a', '2026-10-30', '2026-10-28'),                // late
+    done('d3', 'b', '2026-10-20'),                              // before the week
+    done('d4', 'zz', '2026-10-28'),                             // not in scope
+    mk('o1', 'a', { dueDate: '2026-10-29' }),                   // overdue
+    mk('o2', 'b', { dueDate: '2026-10-01' }),                   // overdue, older
+    mk('r1', 'b', { status: 'in_review', statusCategory: 'review', dueDate: '2026-11-04' }),
+    mk('p1', 'a', { status: 'blocked', statusCategory: 'paused', statusNote: 'Waiting for APD' }),
+    mk('w1', 'b', { blockedBy: ['o1'], dueDate: '2026-11-20' }),               // waits for an open task
+    mk('u1', 'a', { dueDate: '2026-11-05' }), mk('u2', 'b', { dueDate: '2026-11-09' }), mk('u3', 'b', { dueDate: '2026-11-03' }),
+    mk('s1', 'b', { checklist: [{ id: '1', text: 'x', done: true, doneBy: 'a', doneAt: '2026-10-28T09:00:00' }, { id: '2', text: 'y', done: true, doneBy: 'a', doneAt: '2026-10-20T09:00:00' }] })
+  ];
+  const leaves = [
+    { id: 'l1', userId: 'a', teamId: 't1', type: 'annual', startDate: '2026-11-04', endDate: '2026-11-06', half: 'full', status: 'approved' },
+    { id: 'l2', userId: 'b', teamId: 't1', type: 'annual', startDate: '2026-11-04', endDate: '2026-11-04', half: 'full', status: 'pending' },
+    { id: 'l3', userId: 'b', teamId: 't1', type: 'annual', startDate: '2026-12-20', endDate: '2026-12-22', half: 'full', status: 'approved' }
+  ];
+  const m = compileWeekly({ people: [ann, bob], tasks, leaves, holidays: [], week: last, today: TODAY });
+
+  test('weeks', () => {
+    assert.deepEqual([last.from, last.to, last.inProgress], ['2026-10-26', '2026-11-01', false]);
+    const cur = resolveWeek('this', TODAY);
+    assert.deepEqual([cur.from, cur.to, cur.inProgress], ['2026-11-02', '2026-11-08', true]);
+  });
+  test('finished in the week, and how many were late', () => {
+    assert.deepEqual(m.done.map((t) => t.id), ['d1', 'd2']);
+    assert.equal(m.headline.done, 2); assert.equal(m.headline.late, 1); assert.equal(m.headline.onTimeRate, 0.5);
+  });
+  test('steps are credited to whoever ticked them, inside the week only', () => {
+    assert.equal(m.headline.steps, 1);
+    assert.equal(m.rows.find((r) => r.person.id === 'a').steps, 1);
+  });
+  test('overdue is oldest first; review, blocked and paused are found', () => {
+    assert.deepEqual(m.overdue.map((t) => t.id), ['o2', 'o1']);
+    assert.deepEqual(m.review.map((t) => t.id), ['r1']);
+    assert.deepEqual(m.blocked.map((t) => t.id).sort(), ['p1', 'w1']);
+  });
+  test('the next seven days, with a heads up when the owner is away', () => {
+    assert.deepEqual(m.upcoming.map((u) => u.task.id), ['u3', 'r1', 'u1']);                      // 3, 4 and 5 Nov; 9 Nov is outside
+    assert.deepEqual(m.upcoming.map((u) => u.away), [false, false, true]);                       // Ann is on approved leave on the 5th
+  });
+  test('leave: approved only, inside the next two weeks, in working days', () => {
+    assert.equal(m.away.length, 1);
+    assert.deepEqual([m.away[0].person.id, m.away[0].days], ['a', 3]);
+  });
+  test('people rows only list people with something to say', () => {
+    assert.deepEqual(m.rows.map((r) => r.person.id), ['a', 'b']);
+    const quiet = compileWeekly({ people: [ann, bob], tasks: [], leaves: [], holidays: [], week: last, today: TODAY });
+    assert.equal(quiet.rows.length, 0); assert.equal(quiet.glance[0], 'No tasks were finished last week.');
+  });
+  test('the sentences and the text copy', () => {
+    assert.match(m.glance[0], /2 tasks were finished last week, 50% on time \(1 late\)/);
+    assert.ok(m.glance.some((g) => /2 tasks are overdue, most with Bob \(1\)|2 tasks are overdue/.test(g)));
+    assert.ok(m.glance.some((g) => /1 of them when the owner is away/.test(g)));
+    const text = weeklyText(m, { scope: 'Test team', nameOf: (id) => ({ a: 'Ann', b: 'Bob' })[id], today: TODAY });
+    assert.match(text, /^WEEKLY SUMMARY: Test team/);
+    assert.match(text, /Overdue now \(2\)/);
+    assert.match(text, /- o2 \(Bob, due 1 Oct\) - 32 days late/);
+    assert.match(text, /owner away/);
+  });
+  test('this week counts up to today only', () => {
+    const cur = resolveWeek('this', '2026-11-04');
+    const t = [done('x1', 'a', '2026-11-03'), done('x2', 'a', '2026-11-06')];       // the 6th has not happened yet
+    const r = compileWeekly({ people: [ann], tasks: t, leaves: [], holidays: [], week: cur, today: '2026-11-04' });
+    assert.deepEqual(r.done.map((x) => x.id), ['x1']);
   });
 });

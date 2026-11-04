@@ -260,7 +260,9 @@ service cloud.firestore {
 
         allow create: if active() && canSeeParent()
           && request.resource.data.keys().hasOnly(
-               ['authorId', 'authorName', 'text', 'createdAt', 'logId'])
+               ['authorId', 'authorName', 'text', 'createdAt', 'logId', 'mentions'])
+          && (!('mentions' in request.resource.data)
+              || (request.resource.data.mentions is list && request.resource.data.mentions.size() <= 5))
           && request.resource.data.authorId == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
@@ -271,6 +273,46 @@ service cloud.firestore {
         // Comments are permanent so the discussion stays trustworthy.
         allow update, delete: if false;
       }
+    }
+
+    // ---------------------------------------------------------------- mentions
+    // "@Name" in a comment. The comment lists the people it mentions (at most 5) and, in the SAME
+    // batch, one small note is written for each of them. The note can only be made by the author
+    // of that comment and only for someone the comment names, so nobody can send alerts out of the
+    // blue. The person it is for reads it and can mark it read; nothing else can change and
+    // nothing is deleted.
+
+    match /mentions/{mentionId} {
+      function commentOf(d) {
+        return getAfter(/databases/$(database)/documents/tasks/$(d.taskId)/comments/$(d.commentId)).data;
+      }
+
+      allow get, list: if active() && resource.data.toId == request.auth.uid;
+
+      allow create: if active()
+        && request.resource.data.keys().hasOnly(
+             ['toId', 'fromId', 'fromName', 'taskId', 'taskTitle', 'commentId', 'snippet', 'read', 'createdAt'])
+        && request.resource.data.fromId == request.auth.uid
+        && request.resource.data.toId is string
+        && request.resource.data.toId != request.auth.uid
+        && request.resource.data.taskId is string
+        && request.resource.data.commentId is string
+        && request.resource.data.taskTitle is string && request.resource.data.taskTitle.size() <= 200
+        && request.resource.data.fromName is string && request.resource.data.fromName.size() <= 100
+        && request.resource.data.snippet is string && request.resource.data.snippet.size() <= 160
+        && request.resource.data.read == false
+        && request.resource.data.createdAt == request.time
+        && commentOf(request.resource.data).authorId == request.auth.uid
+        && request.resource.data.toId in commentOf(request.resource.data).get('mentions', [])
+        && get(/databases/$(database)/documents/users/$(request.resource.data.toId)).data.active == true;
+
+      // The person it is for marks it read. Nothing else may change.
+      allow update: if active()
+        && resource.data.toId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        && request.resource.data.read == true;
+
+      allow delete: if false;
     }
 
     // -------------------------------------------------------- task templates

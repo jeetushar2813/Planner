@@ -278,10 +278,12 @@ function seed() {
       status, statusCategory: cat[status], statusNote: note || null,
       priority, startDate: day(dueOffset - 7), dueDate: day(dueOffset), estimateHours: est,
       checklist: i === 0 ? [
-        { id: 'c1', text: 'BM version', done: true },
-        { id: 'c2', text: 'English version', done: true },
-        { id: 'c3', text: 'Chinese version', done: false }
+        { id: 'c1', text: 'BM version', done: true, doneBy: 'mei', doneAt: new Date(now.getTime() - 86400000 * 2).toISOString() },
+        { id: 'c2', text: 'English version', done: true, assigneeId: 'omar', assignedBy: 'lena', assignedAt: new Date(now.getTime() - 86400000 * 3).toISOString(),
+          doneBy: 'omar', doneAt: new Date(now.getTime() - 86400000).toISOString() },
+        { id: 'c3', text: 'Chinese version', done: false, assigneeId: 'omar', assignedBy: 'lena', assignedAt: new Date(now.getTime() - 3600000).toISOString() }
       ] : [],
+      ...(i === 0 ? { checklistAssignees: ['omar'], checklistForTeam: false } : {}),
       ...(i === 0 ? { tags: ['chapters', 'qc'] } : {}),
       ...(i === 1 ? { tags: ['chapters'], blockedBy: ['t01'] } : {}),
       ...(i === 2 ? { tags: ['qc'] } : {}),

@@ -15,12 +15,13 @@ import {
 import { diffFields, summarize, taskAction } from './log.js';
 import { todayISO, toDate } from './util.js';
 import * as perm from './perm.js';
-import { deriveStepFields, cleanSteps, dropOutsiders } from './steps.js';
+import { deriveStepFields, cleanSteps, dropOutsiders, stampSteps } from './steps.js';
 import { groupLeaves, buildPolicy } from './entitlement.js';
 import { applyTheme, isTheme } from './theme.js';
 import { cleanTags } from './tags.js';
 import { MAX_BLOCKERS } from './deps.js';
 import { missingForNew } from './taskrules.js';
+import { findMentions, snippetOf, MAX_MENTIONS } from './mentions.js';
 import { dueOccurrence, occurrenceTaskId, dueDateFor, MAX_TEMPLATE_OWNERS, REPEATS } from './recurrence.js';
 
 let backend = null;
@@ -310,6 +311,18 @@ export function watchMyTasks(onData, onError) {
   );
 }
 
+// Tasks (any owner) that have a checklist step given to the signed-in person. One query per team
+// of theirs: the Security Rules only let a person read tasks of their own teams, so each query
+// has to name the team. "teamId ==" plus "array-contains" is served by the automatic single-field
+// indexes (no composite index). Finished tasks come back too; the alerts filter them out.
+export async function loadMyStepTasks() {
+  const teamIds = state.user.teamIds || [];
+  const results = await Promise.all(teamIds.map((teamId) => backend.query('tasks', {
+    where: [['teamId', '==', teamId], ['checklistAssignees', 'array-contains', state.user.id]]
+  })));
+  return remember(results.flatMap((r) => r.docs));
+}
+
 export async function loadOpenTasks({ teamId = null } = {}) {
   const where = teamId ? [['teamId', '==', teamId], ...openQuery] : [...openQuery];
   const { docs } = await backend.query('tasks', { where });
@@ -390,7 +403,9 @@ export const MAX_ASSIGNEES = 30;
 // `extra` is for tasks made from a template: a fixed id, and the template they came from.
 function buildTask(draft, ownerId, status, extra = {}) {
   const teamId = teamForOwner(draft, ownerId);
-  const { steps, dropped } = dropOutsiders(cleanSteps(draft.checklist), teamId, teamIdsOf);
+  const dropRes = dropOutsiders(cleanSteps(draft.checklist), teamId, teamIdsOf);
+  const steps = stampSteps(dropRes.steps, [], state.user.id);
+  const dropped = dropRes.dropped;
   const id = extra.id || backend.newId('tasks');
   const stamp = backend.ts();
   const title = (extra.title || draft.title).trim();
@@ -505,6 +520,7 @@ export async function updateTask(original, draft) {
   // Steps: only the allowed keys, and nobody keeps a step in a team they are not part of.
   let steps = cleanSteps(next.checklist);
   if (next.teamId !== original.teamId) steps = dropOutsiders(steps, next.teamId, teamIdsOf).steps;
+  steps = stampSteps(steps, original.checklist, state.user.id);
 
   const normalised = {
     ...next,
@@ -570,22 +586,70 @@ export async function loadComments(taskId) {
   return docs;
 }
 
+// People who can be named in a comment on this task: everyone who can read it (the task's team,
+// its owner, whoever created it, the project owner and every Director or Superuser), not yourself.
+export function mentionCandidates(task) {
+  const me = state.user.id;
+  const project = task.projectId ? projectById(task.projectId) : null;
+  return state.ref.users
+    .filter((u) => u.active !== false && u.id !== me && (
+      (u.teamIds || []).includes(task.teamId) || u.id === task.ownerId || u.id === task.createdBy
+      || (project && u.id === project.ownerId) || u.role === 'director' || u.superuser === true))
+    .map((u) => ({ id: u.id, name: u.name }));
+}
+
 export async function addComment(task, text) {
   const clean = (text || '').trim();
   if (!clean) throw new Error('Please type a comment first.');
   if (clean.length > 2000) throw new Error('That comment is too long (2000 characters at most).');
+  const people = mentionCandidates(task);
+  const mentions = findMentions(clean, people, MAX_MENTIONS + 1);
+  if (mentions.length > MAX_MENTIONS) throw new Error(`You can mention at most ${MAX_MENTIONS} people in one comment.`);
   const commentId = backend.newId(`tasks/${task.id}/comments`);
   const log = makeLog({
     action: 'comment.add', entityType: 'comment', entityId: commentId,
     entityTitle: task.title, teamId: task.teamId,
-    changes: [{ field: 'text', from: '', to: clean.length > 120 ? clean.slice(0, 117) + '...' : clean }]
+    changes: [
+      { field: 'text', from: '', to: clean.length > 120 ? clean.slice(0, 117) + '...' : clean },
+      ...(mentions.length ? [{ field: 'mentions', from: '', to: mentions.map(userName).join(', ') }] : [])
+    ]
   });
   const comment = {
     authorId: state.user.id, authorName: state.user.name, text: clean,
+    ...(mentions.length ? { mentions } : {}),
     createdAt: backend.ts(), logId: log.id
   };
-  await backend.commit([{ type: 'set', path: `tasks/${task.id}/comments/${commentId}`, data: comment }, log.op]);
+  // One small note per person named, written in the same batch as the comment.
+  const notes = mentions.map((toId) => ({
+    type: 'set', path: 'mentions/' + backend.newId('mentions'),
+    data: {
+      toId, fromId: state.user.id, fromName: state.user.name, taskId: task.id, taskTitle: task.title,
+      commentId, snippet: snippetOf(clean), read: false, createdAt: backend.ts()
+    }
+  }));
+  await backend.commit([{ type: 'set', path: `tasks/${task.id}/comments/${commentId}`, data: comment }, log.op, ...notes]);
   return { id: commentId, ...comment, createdAt: new Date() };
+}
+
+// Notes for the signed-in person that they have not marked read. One equality query, no index.
+export async function loadMyMentions() {
+  const { docs } = await backend.query('mentions', { where: [['toId', '==', state.user.id], ['read', '==', false]] });
+  return docs;
+}
+
+// One task by id (for opening it from an alert). Uses the copy already loaded when there is one.
+export async function loadTask(id) {
+  const have = state.tasks.get(id);
+  if (have) return have;
+  const doc = await backend.getDoc('tasks/' + id);
+  if (doc) state.tasks.set(id, doc);
+  return doc;
+}
+
+export async function markMentionsRead(ids) {
+  const list = [...new Set(ids)].slice(0, 400);
+  if (!list.length) return;
+  await backend.commit(list.map((id) => ({ type: 'update', path: 'mentions/' + id, data: { read: true } })));
 }
 
 // ----------------------------------------------------------------------- people

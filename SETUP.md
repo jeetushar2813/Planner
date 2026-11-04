@@ -209,6 +209,15 @@ taskRules: {
   Team tasks shows "N steps for you" next to such tasks, and there is a **Steps for me** filter.
   Limit worth knowing: the database cannot look inside a checklist, so someone allowed to tick steps could in principle also
   tick or un-tick the other steps of that task (never anything else). The page only offers them their own.
+- **Credit for checklist steps (no rules change, no new index):** a step counts for the person who ticked it, on their own
+  task or on someone else's. **Reports** now show a **Steps done** tile, a **Steps done** column in each person's scorecard (with
+  "N for others" when some were on other people's tasks), a **Steps completed** list, and the same in the Excel file (new
+  **Steps done** sheet; the People sheet gains Steps done, Steps on others tasks and Steps waiting). Steps ticked before this
+  update are credited too, because the app already recorded who ticked each step and when.
+  The **Alerts** bell also shows **Steps given to you** (a step someone gave you after you last cleared the alerts). That costs
+  one small read per team when the app opens and again when the bell is opened (at most every 2 minutes). Steps given before this
+  update carry no "given at" time, so they do not raise an alert. A step's time is not counted in the person's task figures
+  such as days to finish or on-time rate: those still belong to the task owner.
 - Recommended: run `npm run test:rules` on your Mac. It now also checks Superuser and the step rules. (I could not run the rules
   tests in my own environment, so please run them once after publishing and tell me if anything fails.)
 
@@ -249,3 +258,23 @@ export const appSettings = {
 
 Firestore on the free plan has no scheduled backup. Phase 4 adds an "Export everything to Excel" button.
 Until then, avoid deleting the Firebase project and keep a note of who has console access.
+
+
+## Mentions, Workload and Weekly summary
+
+- **Publish `firestore.rules` again (needed for mentions).** Mentions add a small `mentions` collection. Until the new rules are
+  published, a comment that names someone will be refused. Comments without a mention keep working. Then run `npm run test:rules`
+  on your Mac (new "mentions" tests).
+- **@mentions:** in a task's comment box type `@` and pick a name (or keep typing the name). Anyone who can read the task can be
+  named: the task's team, its owner, whoever created it, the project owner and Directors. At most 5 people per comment. Each person
+  named gets "Mentioned you" in their **Alerts** bell until they open it or press **Mark new as seen**. Cost: one small read per
+  person when the app opens (and when the bell is opened, at most every 2 minutes), one small write per person named.
+  Comments stay permanent and are logged; the log line says who was named.
+- **Workload** (Assistant Team Leader and above): hours due in the period against each person's working time (weekends, public
+  holidays and approved leave taken out). Pick "rest of this week", "next week", "next 2 weeks" or "rest of this month". Click a
+  person to see their tasks and waiting steps. A task with no estimate counts as 0 hours and is flagged. The length of a working
+  day is 8 hours; to change it add `workHoursPerDay: 7.5` to `appSettings` in `js/config.js`.
+- **Weekly summary** (Assistant Team Leader and above): last week (or this week so far) and the 7 days ahead, in meeting order:
+  at a glance, people, finished, overdue, waiting for review, blocked or paused, due soon, who is away. **Copy as text** puts it on
+  the clipboard for a chat or email; **Save as PDF** opens the print window. The Notes box is not saved. Reads: each team's open
+  tasks, the tasks finished that week and leave, kept for 5 minutes. No new index and no rules change for these two pages.

@@ -110,8 +110,7 @@ export function renderReports(container) {
       [...(teamReports ? [{ value: '', label: 'Team report' }] : []), ...choices.map((p) => ({ value: p.id, label: 'Project: ' + p.name }))], f.projectId,
       { 'aria-label': 'Report on', onchange: (e) => { f.projectId = e.target.value; f.personId = ''; load(); } }) : null;
     if (f.projectId) {
-      const owners = [...new Set((data?.tasks || []).map((t) => t.ownerId))].map((id) => userById(id)).filter(Boolean)
-        .sort((a, b) => a.name.localeCompare(b.name));
+      const owners = projectPeople().sort((a, b) => a.name.localeCompare(b.name));
       if (f.personId && !owners.some((p) => p.id === f.personId)) f.personId = '';
       add(controls, projectPick,
         select([{ value: '', label: 'Everyone in the project' }, ...owners.map((p) => ({ value: p.id, label: p.name }))], f.personId,
@@ -139,10 +138,15 @@ export function renderReports(container) {
   }
 
   // ------------------------------------------------------------------- scope
+  // People on a project: task owners, plus anyone who ticked a step on one of its tasks (they get credit too).
+  function projectPeople() {
+    const ids = (data?.tasks || []).flatMap((t) => [t.ownerId, ...(t.checklist || []).filter((s) => s.done && s.doneBy).map((s) => s.doneBy)]);
+    return [...new Set(ids)].map((id) => userById(id)).filter(Boolean);
+  }
+
   function scope() {
     if (f.projectId) {
-      const owners = [...new Set((data?.tasks || []).map((t) => t.ownerId))].map((id) => userById(id)).filter(Boolean)
-        .filter((u) => !f.personId || u.id === f.personId);
+      const owners = projectPeople().filter((u) => !f.personId || u.id === f.personId);
       const text = `Project: ${projectName(f.projectId)}${f.personId ? ` · ${userName(f.personId)}` : ''}`;
       return { scopeIds: [], people: owners, scopeText: text };
     }
@@ -221,6 +225,8 @@ export function renderReports(container) {
       section(`Tasks completed (${hd.completed})`, taskList('done', model.completed, ['Task', 'Owner', 'Project', 'Due', 'Completed', 'On time'],
         (t) => [titleCell(t), userName(t.ownerId), projectName(t.projectId) || '–', t.dueDate ? fmtDate(t.dueDate) : '–', fmtDate(t.completedDate),
           wasOnTime(t) ? 'Yes' : `Late by ${daysBetween(t.dueDate, t.completedDate)}d`], 'Nothing was completed in this period.')),
+      section(`Steps completed (${hd.steps})`, taskList('steps', model.steps, ['Step', 'Task', 'Done by', 'Task owner', 'Done on'],
+        (x) => [x.step.text, titleCell(x.task), userName(x.by), userName(x.task.ownerId), fmtDate(x.date)], 'No checklist steps were ticked in this period.')),
       section(`Still open today (${hd.openNow})`, taskList('open', model.open, ['Task', 'Owner', 'Status', 'Due', 'Overdue'],
         (t) => [titleCell(t), userName(t.ownerId), statusName(t.status), t.dueDate ? fmtDate(t.dueDate) : '–',
           t.dueDate && t.dueDate < today ? `${daysBetween(t.dueDate, today)}d` : '–'], 'No open tasks.')),
@@ -230,6 +236,7 @@ export function renderReports(container) {
         h('ul', null,
           h('li', null, 'Completed: tasks that reached a Done status, counted on the day they were completed.'),
           h('li', null, 'Finished on time: completed on or before the due date. A task with no due date counts as on time.'),
+          h('li', null, 'Steps done: checklist steps ticked in the period. The credit goes to the person who ticked the step, on their own task or on someone else’s. Steps given to a person but not yet ticked are shown when you point at the figure.'),
           h('li', null, 'Created: tasks added in the period. Cancelled tasks are not included.'),
           h('li', null, 'Open and overdue are the position today. The app does not keep history, so they are not “as at” the end of the period.'),
           isProject ? h('li', null, 'People involved: everyone who owns at least one task in the project, whichever team they are in.')
@@ -255,6 +262,7 @@ export function renderReports(container) {
       tile('Completed', hd.completed, compare(hd.completed, hd.completedPrev)),
       tile('Finished on time', pct(hd.onTimeRate),
         hd.onTimeRate === null ? { text: 'nothing completed', tone: '' } : compare(Math.round(hd.onTimeRate * 100), hd.onTimeRatePrev === null ? null : Math.round(hd.onTimeRatePrev * 100), { unit: ' pts' })),
+      tile('Steps done', hd.steps, compare(hd.steps, hd.stepsPrev), 'checklist steps ticked'),
       tile('Created', hd.created, compare(hd.created, hd.createdPrev), '', true),
       tile('Days to finish (avg)', oneDec(hd.avgDays), compare(hd.avgDays, hd.avgDaysPrev, { digits: 1, lowerIsBetter: true })),
       tile('Sent back for rework', hd.rework, compare(hd.rework, hd.reworkPrev, { lowerIsBetter: true })),
@@ -292,12 +300,15 @@ export function renderReports(container) {
     if (!rows.length) return noData('No people in this view.');
     const num = (n) => (n === null ? '–' : (Math.round(n * 10) / 10).toString());
     return h('div', { class: 'table-wrap' }, h('table', { class: 'tasks compact report-table' },
-      h('thead', null, h('tr', null, ['Person', 'Completed', 'On time', 'Days to finish', 'Rework', 'Created', 'Open today', 'Overdue today', ...(model.scopeKind === 'project' ? [] : ['Leave days'])]
+      h('thead', null, h('tr', null, ['Person', 'Completed', 'On time', 'Steps done', 'Days to finish', 'Rework', 'Created', 'Open today', 'Overdue today', ...(model.scopeKind === 'project' ? [] : ['Leave days'])]
         .map((x, i) => h('th', { class: i ? 'num' : '' }, x)))),
       h('tbody', null, rows.map((r) => h('tr', null,
         h('td', null, r.person.name),
         h('td', { class: 'num' }, r.done),
         h('td', { class: 'num' }, r.done ? `${pct(r.rate)}${r.late ? ` (${r.late} late)` : ''}` : '–'),
+        h('td', { class: 'num', title: `${r.stepsHelped} on other people's tasks${r.stepsWaiting ? `, ${r.stepsWaiting} more waiting` : ''}` },
+          r.stepsDone,
+          r.stepsHelped ? h('span', { class: 'muted small', style: { display: 'block', whiteSpace: 'nowrap' } }, `${r.stepsHelped} for others`) : null),
         h('td', { class: 'num' }, num(r.avgDays)),
         h('td', { class: 'num' }, r.rework),
         h('td', { class: 'num' }, r.created),

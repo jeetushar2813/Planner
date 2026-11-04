@@ -8,9 +8,10 @@ import * as perm from '../core/perm.js';
 import { cleanTag, cleanTags, tagCounts, MAX_TAGS } from '../core/tags.js';
 import { openBlockers, wouldLoop, MAX_BLOCKERS } from '../core/deps.js';
 import { requiredHints, availabilityWarnings } from '../core/taskrules.js';
+import { splitMentions, mentionQuery, suggestPeople } from '../core/mentions.js';
 import {
   state, myTeams, ownerCandidates, activeStatuses, statusById, teamById, userName, projectName,
-  userById, assignableUsers, userWithTeams, createTasks, updateTask, loadComments, addComment, teamForOwner, MAX_ASSIGNEES,
+  userById, assignableUsers, userWithTeams, createTasks, updateTask, loadComments, addComment, mentionCandidates, teamForOwner, MAX_ASSIGNEES,
   availabilityData, canUseTemplates, loadTemplates, draftFromTemplate, loadOpenTasks
 } from '../core/store.js';
 import {
@@ -644,16 +645,56 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {  /
   // ---------------------------------------------------------------- comments
   async function drawComments() {
     const list = h('div', { class: 'comment-list' }, spinner('Loading comments'));
-    const input = h('textarea', { rows: 2, maxlength: 2000, placeholder: 'Write a comment', 'aria-label': 'New comment' });
+    const input = h('textarea', { rows: 2, maxlength: 2000, placeholder: 'Write a comment. Type @ to mention a teammate.', 'aria-label': 'New comment' });
     const send = h('button', { type: 'button', class: 'btn btn-primary' }, 'Comment');
+    const suggest = h('div', { class: 'mention-pop', role: 'listbox', 'aria-label': 'People you can mention', hidden: true });
+    const names = mentionCandidates(task).concat([{ id: user.id, name: user.name }]);   // for highlighting, yourself included
+    const people = perm.canComment(user, task) ? mentionCandidates(task) : [];
     clear(commentsBox);
     add(commentsBox, h('h3', null, 'Comments'), list,
       perm.canComment(user, task)
-        ? h('div', { class: 'comment-form' }, input, send) : null);
+        ? h('div', { class: 'comment-form' }, h('div', { class: 'mention-wrap' }, input, suggest), send) : null);
 
+    // Comments show the names that were mentioned in a highlighted colour. People are those who can read this task.
     const show = (comment) => h('div', { class: 'comment' },
       h('div', { class: 'comment-head' }, h('strong', null, comment.authorName), h('span', { class: 'muted' }, fmtDateTime(comment.createdAt))),
-      h('p', null, comment.text));
+      h('p', null, ...splitMentions(comment.text, names)
+        .map((piece) => (piece.mention ? h('span', { class: 'mention' }, piece.text) : piece.text))));
+
+    // ---- suggestions while typing "@..."
+    let shown = [];
+    const hide = () => { suggest.hidden = true; shown = []; };
+    const choose = (p) => {
+      const q = mentionQuery(input.value, input.selectionStart);
+      if (!q) return hide();
+      const before = input.value.slice(0, q.start);
+      const after = input.value.slice(input.selectionStart);
+      input.value = `${before}@${p.name} ${after}`;
+      const caret = before.length + p.name.length + 2;
+      input.setSelectionRange(caret, caret);
+      input.focus();
+      hide();
+    };
+    const refreshSuggest = () => {
+      const q = mentionQuery(input.value, input.selectionStart);
+      if (!q || !people.length) return hide();
+      shown = suggestPeople(people, q.query);
+      if (!shown.length) return hide();
+      clear(suggest);
+      shown.forEach((p, i) => suggest.append(h('button', {
+        type: 'button', class: 'mention-option' + (i === 0 ? ' first' : ''), role: 'option',
+        onmousedown: (e) => { e.preventDefault(); choose(p); }
+      }, p.name)));
+      suggest.hidden = false;
+    };
+    input.addEventListener('input', refreshSuggest);
+    input.addEventListener('click', refreshSuggest);
+    input.addEventListener('blur', () => setTimeout(hide, 120));
+    input.addEventListener('keydown', (e) => {
+      if (suggest.hidden || !shown.length) return;
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); choose(shown[0]); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hide(); }
+    });
 
     try {
       const comments = await loadComments(task.id);
@@ -672,6 +713,9 @@ export function openTaskPanel({ task = null, defaults = {}, onSaved } = {}) {  /
         list.querySelector('.empty-comments')?.remove();
         list.append(show(comment));
         input.value = '';
+        hide();
+        const n = (comment.mentions || []).length;
+        if (n) toast(`${n} ${n === 1 ? 'person' : 'people'} will see this in their Alerts.`, 'success');
       } catch (err) { toast(errorMessage(err), 'error'); }
       send.disabled = false;
     });

@@ -259,6 +259,70 @@ describe('changing tasks', () => {
   });
 });
 
+// ---------------------------------------------------------------- mentions
+
+describe('mentions', () => {
+  // A comment that names someone, plus one note for each person named, in one batch.
+  const mentionBatch = ({ author = 'memA1', taskId = 'tA2', named = ['memA2'], notes = named, noteOver = {}, commentOver = {} } = {}) => {
+    const db = as(author);
+    const cid = id('c');
+    const logId = id('log');
+    const b = writeBatch(db);
+    b.set(doc(db, 'tasks', taskId, 'comments', cid), {
+      authorId: author, authorName: author, text: 'hello', createdAt: serverTimestamp(), logId, mentions: named, ...commentOver
+    });
+    b.set(doc(db, 'activityLog', logId), logBody(author, USERS[author].role, 'comment', cid, 'teamA'));
+    for (const toId of notes) {
+      b.set(doc(db, 'mentions', id('m')), {
+        toId, fromId: author, fromName: author, taskId, taskTitle: 'A task', commentId: cid, snippet: 'hello', read: false, createdAt: serverTimestamp(), ...noteOver
+      });
+    }
+    return b.commit();
+  };
+  test('a comment can name teammates and notify them in the same batch', async () => {
+    await assertSucceeds(mentionBatch({ named: ['memA2', 'ldrA'] }));
+  });
+  test('five people in one comment still fit in one batch', async () => {
+    await assertSucceeds(mentionBatch({ named: ['memA2', 'ldrA', 'dir', 'mgrA', 'asstA'] }));
+  });
+  test('someone who is not active cannot be notified', async () => {
+    await assertFails(mentionBatch({ named: ['gone'] }));
+  });
+  test('five people at most', async () => {
+    await assertFails(mentionBatch({ named: ['memA2', 'ldrA', 'dir', 'memB', 'mgrA', 'asstA'] }));
+  });
+  test('a note cannot be made for someone the comment does not name', async () => {
+    await assertFails(mentionBatch({ named: ['memA2'], notes: ['memA2', 'ldrA'] }));
+  });
+  test('a note cannot be made without a comment, or in someone else’s name', async () => {
+    await assertFails(setDoc(doc(as('memA1'), 'mentions', id('m')), {
+      toId: 'memA2', fromId: 'memA1', fromName: 'x', taskId: 'tA2', taskTitle: 'A task', commentId: 'nope', snippet: 'hi', read: false, createdAt: serverTimestamp()
+    }));
+    await assertFails(mentionBatch({ noteOver: { fromId: 'memA2' } }));
+  });
+  test('you cannot notify yourself, and a note starts unread', async () => {
+    await assertFails(mentionBatch({ named: ['memA1'] }));
+    await assertFails(mentionBatch({ noteOver: { read: true } }));
+  });
+  test('only the person it is for reads a note, and can only mark it read', async () => {
+    let noteId;
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      noteId = id('m');
+      await setDoc(doc(ctx.firestore(), 'mentions', noteId), {
+        toId: 'memA2', fromId: 'memA1', fromName: 'x', taskId: 'tA2', taskTitle: 'A task', commentId: 'c0', snippet: 'hi', read: false, createdAt: new Date()
+      });
+    });
+    await assertSucceeds(getDocs(query(collection(as('memA2'), 'mentions'), where('toId', '==', 'memA2'), where('read', '==', false))));
+    await assertFails(getDocs(query(collection(as('memA1'), 'mentions'), where('toId', '==', 'memA2'))));
+    await assertFails(getDoc(doc(as('dir'), 'mentions', noteId)));
+    await assertFails(updateDoc(doc(as('memA1'), 'mentions', noteId), { read: true }));
+    await assertFails(updateDoc(doc(as('memA2'), 'mentions', noteId), { snippet: 'changed' }));
+    await assertFails(updateDoc(doc(as('memA2'), 'mentions', noteId), { read: false }));
+    await assertSucceeds(updateDoc(doc(as('memA2'), 'mentions', noteId), { read: true }));
+    await assertFails(deleteDoc(doc(as('memA2'), 'mentions', noteId)));
+  });
+});
+
 // ---------------------------------------------------------------- comments
 
 describe('comments', () => {
